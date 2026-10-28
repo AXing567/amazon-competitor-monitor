@@ -524,8 +524,20 @@ class DiffEngine:
 
 
 def _effective_price(s: UnifiedSnapshot) -> Optional[float]:
-    """取「买家实际付的钱」：优先净价，其次标价。"""
-    return s.net_price if s.net_price is not None else s.price
+    """取「买家实际付的钱」。
+
+    只认促销接口确认过的净价。净价不可知时返回 None，**绝不拿标价顶替**。
+
+    为什么这么严：标价和到手价差着一个优惠券的额度。对手挂 20% 券时，
+    用标价去比会得出「没降价」的结论——这比不报更糟，因为你以为自己知道。
+
+    代价是：促销接口挂掉的那一轮，价格监控直接失效。这是刻意的取舍，
+    属于「宁可漏报，不可误报」。漏报会体现在 data_quality=partial 上，
+    日报的数据健康度会点名。
+    """
+    if s.price_source == "promotion" and s.net_price is not None:
+        return s.net_price
+    return None
 
 
 def _norm(text: str) -> str:

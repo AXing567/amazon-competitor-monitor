@@ -301,13 +301,19 @@ async def _confirm_oos(prev: UnifiedSnapshot, curr: UnifiedSnapshot) -> bool:
 
 
 def row_to_unified(row: Snapshot, marketplace: str = "US") -> UnifiedSnapshot:
-    """把数据库快照还原成统一模型，用于和最新采集做对比。"""
+    """把数据库快照还原成统一模型，用于和最新采集做对比。
+
+    关于 price_source：net_price 只可能由 promotions 接口写入，
+    所以「有 net_price」等价于「当轮促销接口成功」。用这个等价关系反推，
+    不必给快照表加列。
+    """
     return UnifiedSnapshot(
         asin="",
         marketplace=marketplace,
         price=row.price,
         coupon_value=row.coupon_value,
         net_price=row.net_price,
+        price_source="promotion" if row.net_price is not None else None,
         deal_type=row.deal_type,
         rank_main=row.rank_main,
         rank_sub=row.rank_sub,

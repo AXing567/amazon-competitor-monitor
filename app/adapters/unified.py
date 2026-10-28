@@ -25,6 +25,9 @@ class UnifiedSnapshot(BaseModel):
     coupon_type: Optional[str] = None
     net_price: Optional[float] = None
     deal_type: Optional[str] = None
+    # 价格的可信来源。只有 "promotion" 才代表 net_price 可信；缺失代表本轮价格不可知。
+    # 这个字段存在的唯一目的：阻止下游拿标价去顶替到手价。
+    price_source: Optional[str] = None
 
     # ---- 排名 ----
     rank_main: Optional[int] = None

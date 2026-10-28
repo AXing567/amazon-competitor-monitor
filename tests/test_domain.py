@@ -300,7 +300,8 @@ def test_oos_overrides_price_signal():
 
 
 def _snap(**kw) -> UnifiedSnapshot:
-    base = dict(asin="B0TEST", price=20.0, net_price=20.0, rank_sub=1000,
+    base = dict(asin="B0TEST", price=20.0, net_price=20.0, price_source="promotion",
+                rank_sub=1000,
                 rating=4.5, review_count=500, in_stock=True, stock_hint="IN_STOCK",
                 title="Toy Car", image_url="http://img/1.jpg")
     base.update(kw)
@@ -318,6 +319,30 @@ def test_price_small_change_is_noise():
     # 0.3% 的波动必须被当噪声丢掉，否则每轮采集都会误报
     sigs = DiffEngine().compare(_snap(), _snap(net_price=19.94, price=19.94))
     assert not [s for s in sigs if s.category == "price"]
+
+
+def test_promotion_failure_must_not_fake_price_rise():
+    """促销接口失败时，绝不能拿标价去顶替到手价。
+
+    场景：昨天对手挂 20% 券，到手 23.99；今天促销接口超时，核心接口只能给标价 29.99。
+    如果拿标价去比，会得出「他涨价 25%」的结论——纯属误报，他可能还在挂券。
+    正确行为：这一轮价格不可知，不产生任何价格信号。
+    """
+    prev = _snap(price=29.99, net_price=23.99)                       # 昨天有券
+    curr = _snap(price=29.99, net_price=None, price_source=None)     # 今天促销接口挂了
+
+    sigs = DiffEngine().compare(prev, curr)
+    price_sigs = [s for s in sigs if s.category == "price"]
+    assert not price_sigs, f"促销失败时不该推出价格变化，实际得到：{[s.description for s in price_sigs]}"
+
+
+def test_promotion_failure_does_not_hide_real_drop():
+    """反向验证：促销接口正常时，降价照常能测出来，别因为上面的严格而失灵。"""
+    prev = _snap(price=29.99, net_price=29.99)
+    curr = _snap(price=29.99, net_price=23.99)
+    sigs = DiffEngine().compare(prev, curr)
+    drops = [s for s in sigs if s.signal_type == "price_drop"]
+    assert drops and drops[0].level == "P0"
 
 
 def test_coupon_increase_is_p0():

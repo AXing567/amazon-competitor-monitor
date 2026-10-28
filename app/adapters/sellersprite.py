@@ -103,13 +103,26 @@ class SellerSpriteAdapter(DataAdapter):
             snap.monthly_revenue = _to_float(rank.get("est_monthly_revenue"))
             snap.daily_units = _to_int(rank.get("est_daily_sales"))
 
-        # ---- 促销 ----
+        # ---- 促销（价格可信度的唯一来源）----
+        # 只在这里设置 price_source。core-info 的价格是标价，不能代表到手价，
+        # 所以那边不碰这个字段——否则下游会误以为拿到了可信价。
         if promo:
-            snap.price = _to_float(promo.get("current_price")) or snap.price
-            snap.coupon_value = _to_float(promo.get("coupon_value"))
-            snap.coupon_type = promo.get("coupon_type")
-            snap.deal_type = promo.get("deal_type")
-            snap.net_price = _to_float(promo.get("net_price"))
+            p_price = _to_float(promo.get("current_price"))
+            p_net = _to_float(promo.get("net_price"))
+            p_coupon = _to_float(promo.get("coupon_value"))
+
+            if p_price is not None or p_net is not None:
+                snap.coupon_value = p_coupon
+                snap.coupon_type = promo.get("coupon_type")
+                snap.deal_type = promo.get("deal_type")
+                # 促销接口成功且没有券时，到手价与标价相等 —— 这是有依据的等价，不是估算
+                snap.net_price = p_net if p_net is not None else p_price
+                if p_price is not None:
+                    snap.price = p_price
+                snap.price_source = "promotion"
+            else:
+                # 接口返回 200 但字段全空，等于没拿到价，必须如实记下来
+                snap.errors.append("promotions 返回成功但无价格字段，本轮价格不可信")
 
         # ---- 口碑 ----
         if review:
@@ -195,9 +208,16 @@ def _to_int(v: Any) -> Optional[int]:
 
 
 def _judge_quality(snap: UnifiedSnapshot) -> str:
-    """按实际拿到多少关键字段来判定数据质量，不假报。"""
+    """按实际拿到多少关键字段来判定数据质量，不假报。
+
+    注意第一个字段用的是「可信价格」而不是 snap.price：
+    促销接口挂掉时 core-info 还能给出标价，price 不为空，
+    但那个价不能用来判断涨跌。所以必须看 price_source。
+    """
+    trusted_price = snap.net_price if snap.price_source == "promotion" else None
+
     key_fields = [
-        snap.price,
+        trusted_price,
         snap.rank_sub or snap.rank_main,
         snap.rating,
         snap.review_count,
