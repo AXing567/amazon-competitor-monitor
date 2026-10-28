@@ -61,14 +61,21 @@
 
 ## 快速开始
 
-### 0. 前置：先启动卖家精灵转接桥
+### 0. 前置：先准备数据源
 
-本系统不直接调卖家精灵，而是通过本地 bridge：
+本系统不直接调卖家精灵，而是通过一个本地 HTTP bridge 取数。
+bridge 需要单独启动，默认监听 `127.0.0.1:8000`，对外提供 5 个端点：
 
-```bash
-cd ../sellersprite-api-bridge
-# 按那个项目的 README 启动，默认监听 127.0.0.1:8000
-```
+| 端点 | 取的字段 |
+|---|---|
+| `GET /api/v1/competitor/core-info` | 标题、品牌、类目路径、上架日期、Buybox、库存状态 |
+| `GET /api/v1/competitor/sales-rank` | BSR 主/子类目排名、月销估算 |
+| `GET /api/v1/competitor/promotions` | 现价、优惠券、Deal 类型、净价 |
+| `GET /api/v1/competitor/reviews` | 星级、评论数、月增评论 |
+| `GET /api/v1/competitor/traffic-keywords` | 流量词、搜索量、自然/广告排名、流量占比 |
+
+如果你用别的取数方式（自建爬虫、第三方 API），只需要写一个
+`DataAdapter` 子类实现这 5 类字段即可，其余代码不用动。
 
 确认能访问：<http://127.0.0.1:8000/health>
 
@@ -311,8 +318,18 @@ python run.py --no-scheduler
 
 ---
 
-## 相关文档
+## 架构说明
 
-- `../competitor-monitor-tool/docs/竞品监控业务全景手册.md` —— 业务逻辑的完整来源（1372 行）
-- `../competitor-monitor-tool/docs/系统架构设计.md` —— 架构决策与取舍
-- `../competitor-monitor-tool/competitor_scenario_cheatsheet.html` —— 21 个高频场景速查表
+分层、模块边界、接口契约的详细说明见 **[ARCHITECTURE.md](ARCHITECTURE.md)**。
+一句话版本：
+
+```
+接入层 → Agent 层 → 服务层 → 领域层
+                      ↓
+                   适配器层 → 数据源
+                      ↓
+                   存储层
+```
+
+**一条铁律**：领域层是纯函数，不碰数据库、不发网络请求。
+所以它既好测，也能被 Agent 直接调用而不出副作用。
