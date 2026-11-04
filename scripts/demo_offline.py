@@ -24,6 +24,19 @@
 另外：2 个用户 + 3 条平台身份映射（面板右上角切换操作人用）、3 条动作记录、
 2 条对标绑定（带 basis 快照）、每个竞品 3 天的 `collect_runs`（含 2 条失败，分属两个竞品）。
 
+## 分层 / 词重合 / 价格比：全是引擎算的，脚本里一个判定数字都没有
+
+`_seed_competitors()` 只写「这个竞品是谁」；`tier` / `tier_reasons` /
+`price_ratio` / `keyword_overlap` / `node_match` 全部由 `_rescore()` 在生产路径上
+算出来并回写：最新快照 → `collector.row_to_unified()` → `tiering.judge_tier()`，
+阈值取 `settings_store.resolve_tiering_thresholds()`（= 面板显示的那一份）。
+算完立刻自检：**落库值 == 重算值**、**重算层级 == 场景名**，任一不符就 `SystemExit`。
+
+为什么这么较真：曾经的实现把 `tier` 写成场景名、把数字写成常量 0.96 / 0.71，
+于是面板上出现「C 级对手 · 词重合 71%」——真有 71% 重合早该是 A 级以上
+（入池门槛 40%）。这种错**不报错、不崩溃**，只是安静地教人相信一份假报告，
+所以修法不是"把常量改成正确的数"，而是"不许有常量"。
+
 ## 用法
 
     python scripts/demo_offline.py                  # 造数 + 打印一份日报，告诉你怎么起服务
@@ -181,9 +194,12 @@ TARGET_DB_PATH = _preset_database_url(sys.argv)
 
 from sqlalchemy import delete, select  # noqa: E402
 
+from app.adapters.unified import TieringResult                # noqa: E402
 from app.config import settings                              # noqa: E402
 from app.db import get_session, init_db                      # noqa: E402
 from app.domain.diff import DiffEngine                        # noqa: E402
+from app.domain.thresholds import TieringThresholds           # noqa: E402
+from app.domain.tiering import judge_tier                     # noqa: E402
 from app.models import (                                      # noqa: E402
     Action,
     CollectRun,
@@ -197,7 +213,14 @@ from app.models import (                                      # noqa: E402
     User,
     UserIdentity,
 )
-from app.services import action_log, briefer, binding, collector, identity  # noqa: E402
+from app.services import (                                    # noqa: E402
+    action_log,
+    briefer,
+    binding,
+    collector,
+    identity,
+    settings_store,
+)
 
 DEMO_ASIN_PREFIX = "B0DEMO"
 DEMO_MY_ASIN = "B0MINE0001"
@@ -343,21 +366,14 @@ SCENARIOS: list[dict[str, Any]] = [
         "brand": "MysteryBrand",
         "tier": "unknown",
         # 这条演示的是「缺证据 → 待判定，且不硬判成 C」。
-        # 缺的正是流量词与类目路径这两维——所以下面写快照时**刻意不给**。
+        # 缺的正是流量词与类目路径这两维——所以下面写快照时**刻意不给**
+        # （`missing_dims`），而不是在这里补一份假的 `tier_reasons`。
         "missing_dims": True,
+        # 功能形态也确实没确认过：让面板演示出「请人工确认是否为配件/互补品」那句提示。
+        "functional_match": None,
         "days": 7,
         "base_price": 24.99,
         "price_changes": {2: 23.99},
-        # 缺流量词与类目路径 → 可判定维度 < 2 → 不判级（拿不到证据 ≠ 证据表明不成立）
-        "tier_reasons": {
-            "price_ratio": 0.834,
-            "price_band_ok": None,
-            "keyword_overlap": None,
-            "keyword_pool_ok": None,
-        },
-        "keyword_overlap": None,
-        "node_match": None,
-        "functional_match": True,
     },
     {
         "asin": "B0DEMO0006",
@@ -484,6 +500,11 @@ def main() -> None:
     comps = _seed_competitors(my_id)
     for scen in SCENARIOS:
         _seed_history(scen, comps[scen["asin"]]["id"])
+
+    # 分层必须由引擎算：`_seed_competitors()` 一个判定数字都没写。
+    # 位置在 `_seed_history()` 之后（要读最新快照）、`_seed_bindings()` 之前
+    # （绑定要把 `tier_reasons` 存进 basis 快照）。
+    comps = _rescore(comps, my_id, quiet=args.quiet)
 
     _seed_bindings(comps, my_id, uid)
     _seed_collect_runs(comps, my_id)
@@ -900,35 +921,33 @@ def _seed_users(owner_id: int) -> dict[str, int]:
 
 
 def _seed_competitors(my_id: int) -> dict[str, dict]:
-    """8 个竞品，五个分层各至少一个，状态覆盖 active / paused / archived。"""
+    """8 个竞品的**身份字段**。判定类字段一个都不写，交给 `_rescore()`。
+
+    这里只写「这个竞品是谁」：asin / title / brand / status / 生命周期时间戳。
+
+    **不要**在这里写 `tier` / `tier_reasons` / `tier_updated_at` / `price_ratio` /
+    `keyword_overlap` / `node_match`。历史教训：这里曾经用一份默认字典
+    `{"price_ratio": 0.96, "keyword_overlap": 0.71, ...}` 兜底，
+    `tier` 却来自场景名，两者不同源 → 面板上出现「C 级对手 · 词重合 71%」
+    （真有 71% 重合，过 40% 门槛就该是 A 级以上）。这种错不报错、不崩溃，
+    只是安静地教人相信一份自相矛盾的报告。
+
+    `functional_match` 是唯一的例外：它是「同功能形态」的**人工确认输入**，
+    引擎算不出来，所以按场景语义在这里先定（缺证据的 0005 给 None）。
+
+    落库时 `tier` 取模型默认值 `"C"`，从这一刻到 `_rescore()` 之间是临时值，
+    不参与任何展示。
+    """
     now = datetime.now()
     out: dict[str, dict] = {}
     with get_session() as s:
         for scen in SCENARIOS:
-            tier = scen["tier"]
-            reasons = scen.get(
-                "tier_reasons",
-                {
-                    "price_ratio": 0.96,
-                    "price_band_ok": True,
-                    "keyword_overlap": 0.71,
-                    "keyword_pool_ok": True,
-                    "node_match": True,
-                    "functional_match": True,
-                },
-            )
             comp = Competitor(
                 tenant_id=settings.tenant_id,
                 my_product_id=my_id,
                 platform="amazon",
                 marketplace="US",
                 asin=scen["asin"],
-                tier=tier,
-                tier_reasons=reasons,
-                tier_updated_at=now - timedelta(days=3),
-                price_ratio=scen.get("price_ratio", reasons.get("price_ratio")),
-                keyword_overlap=scen.get("keyword_overlap", 0.71),
-                node_match=scen.get("node_match", True),
                 functional_match=scen.get("functional_match", True),
                 title=scen["title"],
                 brand=scen["brand"],
@@ -938,7 +957,7 @@ def _seed_competitors(my_id: int) -> dict[str, dict]:
             )
             s.add(comp)
             s.flush()
-            out[scen["asin"]] = {"id": comp.id, "tier": tier, "title": scen["title"]}
+            out[scen["asin"]] = {"id": comp.id, "title": scen["title"], "scen": scen}
     return out
 
 
@@ -1060,23 +1079,194 @@ def _seed_history(scen: dict, cid: int) -> int:
     return total
 
 
+def _fmt_num(value: Optional[float]) -> str:
+    """自检输出用：`None` 原样打印（"判不了"和"算了是 0"必须看得出来）。"""
+    return "None" if value is None else f"{value:.3f}"
+
+
+def _latest_snapshot(s: Any, cid: int) -> Optional[Snapshot]:
+    """取该竞品**最新**的快照。
+
+    刻意不用 `comp.snapshots[-1]`：那取的是 relationship 的加载顺序，
+    不是时间顺序（关系上没配 `order_by` 时由数据库返回顺序决定，
+    而数据库没有义务按时间返回）。显式按 `(captured_at, id)` 倒序，
+    同一小时里的多条也有确定结果。
+
+    Args:
+        s: 当前 Session。
+        cid: competitor 主键。
+
+    Returns:
+        最新一条快照；该竞品没有任何快照时返回 None。
+    """
+    return s.execute(
+        select(Snapshot)
+        .where(Snapshot.competitor_id == cid)
+        .order_by(Snapshot.captured_at.desc(), Snapshot.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _judge_current(
+    s: Any,
+    my: MyProduct,
+    comp: Competitor,
+    thresholds: TieringThresholds,
+) -> tuple[Optional[TieringResult], Optional[Snapshot]]:
+    """按生产路径算一次分层：最新快照 → `row_to_unified` → `judge_tier`。
+
+    三个输入全部来自库，没有一个是脚本里编的：
+      · 竞品侧：最新快照（价格 / 销量 / 流量词 / 类目路径）
+      · 自家侧：`my_products` 的售价 / 核心词 / 类目路径 / 日均销量
+      · 阈值：`settings_store.resolve_tiering_thresholds()`（= 面板显示的那一份）
+
+    `row_to_unified()` 必须复用生产代码：自己拼一个 `UnifiedSnapshot` 就等于
+    在演示里绕开了「价格不可知不许拿标价顶替」这类生产规则（`price_source`）。
+    """
+    row = _latest_snapshot(s, comp.id)
+    if row is None:
+        return None, None
+    unified = collector.row_to_unified(row, comp.marketplace)
+    res = judge_tier(
+        my_price=my.current_price,
+        my_core_keywords=dict(my.core_keywords or {}),
+        # 空列表要归一成 None：`_check_node_match` 靠 None 表达"判不了"，
+        # 传 `[]` 进去语义上等价，但读代码的人会以为"有类目路径，只是空"。
+        my_category_path=list(my.category_path or []) or None,
+        my_daily_units=my.daily_sales_avg,
+        comp=unified,
+        functional_match=comp.functional_match,
+        thresholds=thresholds,
+    )
+    return res, row
+
+
+def _rescore(comps: dict[str, dict], my_id: int, quiet: bool = False) -> dict[str, dict]:
+    """用真实引擎复算 8 个竞品的分层 → 回写 → **自检**，返回刷新后的 comps。
+
+    ## 为什么必须有这一步
+
+    判定数字必须由 `judge_tier()` 算出来。一旦在脚本里出现 `keyword_overlap=0.71`
+    这样的常量，数字与结论就不同源：阈值一改、场景一改，常量立刻开始说谎，
+    而**没有任何东西会报错**——这正是「C 级对手 · 词重合 71%」的成因。
+    所以修法不是"把常量改成正确的数"，而是"不许有常量"。
+
+    ## 为什么自检要连 `keyword_overlap` / `tier_reasons` 一起核对
+
+    这类 bug 的特征是**层级对、数字错**：只看 `tier` 永远发现不了。
+    自检因此做两件事：
+      1. 「存」= 从库里重新读出来的 `competitors` 行；「重算」= 用同一份数据再跑一次引擎。
+         两者在 `tier`、`keyword_overlap`、`price_ratio`、`node_match` 以及
+         `tier_reasons` 的每个键上都必须相等，不等就 `SystemExit`。
+      2. 重算结果还要与场景名（`SCENARIOS[*]["tier"]`，即"这条本来想演示几级"）一致。
+         不一致说明**演示数据没调好**（价格带 / 词表 / 类目路径），
+         该去调数据，不许放宽断言，更不许改引擎去迁就演示。
+
+    Args:
+        comps: `_seed_competitors()` 的返回值（含 id 与场景定义）。
+        my_id: 自家锚点主键。
+        quiet: True 时只打印不一致项（一致的行不刷屏）。
+
+    Returns:
+        刷新后的 comps：每条带上从库里读回来的 `tier` / `tier_reasons`。
+
+    Raises:
+        SystemExit: 数据不全、自检不一致，或重算结果与场景名不符。
+    """
+    thresholds = settings_store.resolve_tiering_thresholds(settings.tenant_id, my_id)
+
+    # ---- ① 复算并回写 ----
+    with get_session() as s:
+        my = s.get(MyProduct, my_id)
+        if my is None:
+            raise SystemExit(f"演示锚点 id={my_id} 不存在，无法复算分层。")
+        for asin, entry in comps.items():
+            comp = s.get(Competitor, entry["id"])
+            if comp is None:
+                raise SystemExit(f"{asin} 的竞品行不存在（id={entry['id']}），演示数据不完整。")
+            res, row = _judge_current(s, my, comp, thresholds)
+            if res is None or row is None:
+                raise SystemExit(f"{asin} 没有任何快照，无法复算分层（演示数据不完整）。")
+            comp.tier = res.effective_tier          # effective_tier：insufficient → "unknown"
+            comp.tier_reasons = res.tier_reasons
+            comp.tier_updated_at = datetime.now()
+            comp.price_ratio = res.price_ratio
+            comp.keyword_overlap = res.keyword_overlap
+            comp.node_match = res.node_match
+        s.flush()
+
+    # ---- ② 自检：另起一个 session，从库里读回来再独立算一遍 ----
+    refreshed: dict[str, dict] = {}
+    problems: list[str] = []
+    with get_session() as s:
+        my = s.get(MyProduct, my_id)
+        for asin, entry in comps.items():
+            comp = s.get(Competitor, entry["id"])
+            res, _row = _judge_current(s, my, comp, thresholds)
+            stored_reasons = comp.tier_reasons or {}
+            want_reasons = res.tier_reasons
+            bad_keys = [
+                key
+                for key in ("price_ratio", "price_band_ok", "keyword_overlap",
+                            "keyword_pool_ok", "node_match")
+                if stored_reasons.get(key) != want_reasons.get(key)
+            ]
+            consistent = comp.tier == res.effective_tier and not bad_keys
+            line = (
+                f"  {'OK ' if consistent else 'BAD'} {asin} "
+                f"存={comp.tier} 重算={res.effective_tier} "
+                f"dims={res.decidable_dims} kw={_fmt_num(comp.keyword_overlap)} "
+                f"ratio={_fmt_num(comp.price_ratio)} node={comp.node_match}"
+            )
+            if consistent:
+                if not quiet:
+                    print(line)
+            else:
+                problems.append(line.strip() + f" · 不一致字段={bad_keys or ['tier']}")
+
+            # 场景名（人写下的意图）vs 引擎结论
+            expected = str(entry["scen"]["tier"])
+            if res.effective_tier != expected:
+                problems.append(
+                    f"{asin} 场景名写的是 {expected}，引擎算出来是 {res.effective_tier}。"
+                    "这是演示数据没调好（价格带 / 词表 / 类目路径），"
+                    "请调 SCENARIOS / _DEMO_KW_BY_TIER，不要放宽断言、也不要改引擎。"
+                )
+
+            refreshed[asin] = {
+                "id": comp.id,
+                "tier": comp.tier,
+                "tier_reasons": dict(stored_reasons),
+                "title": entry.get("title", ""),
+                "scen": entry["scen"],
+            }
+
+    if problems:
+        raise SystemExit("分层复算自检失败：\n" + "\n".join(f"  · {p}" for p in problems))
+    return refreshed
+
+
 def _seed_bindings(comps: dict[str, dict], my_id: int, uid: int) -> None:
-    """2 条对标绑定，走真实的 `upsert_from_judgment`（basis 里带当时的阈值版本）。"""
+    """2 条对标绑定，走真实的 `upsert_from_judgment`（basis 里带当时的阈值版本）。
+
+    `tier` 与 `tier_reasons` **从 competitors 行读**（`_rescore()` 刚写好的那份），
+    不在这里另写一份字面量：绑定是「当初凭什么判成这样」的存档，
+    存档与竞品行对不上就等于留了两份互相矛盾的证据。
+    """
     for asin in ("B0DEMO0001", "B0DEMO0002"):
-        c = comps[asin]
+        with get_session() as s:
+            comp = s.get(Competitor, comps[asin]["id"])
+            if comp is None:
+                print(f"  ! 绑定 {asin} 失败：竞品行不存在")
+                continue
+            tier = comp.tier
+            reasons = dict(comp.tier_reasons or {})
         res = binding.upsert_from_judgment(
             tenant_id=settings.tenant_id,
-            competitor_id=c["id"],
+            competitor_id=comps[asin]["id"],
             my_product_id=my_id,
-            tier=c["tier"],
-            tier_reasons={
-                "price_ratio": 0.96,
-                "price_band_ok": True,
-                "keyword_overlap": 0.71,
-                "keyword_pool_ok": True,
-                "node_match": True,
-                "functional_match": True,
-            },
+            tier=tier,
+            tier_reasons=reasons,
             user_id=uid,
             confidence=0.82,
         )

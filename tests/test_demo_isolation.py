@@ -16,6 +16,7 @@
 | `test_guard_allows_demo_anchor` | 纯演示库必须放行（守卫不能把正常路径也堵了） |
 | `test_default_db_is_not_main_db` | 默认库路径不能是主库（D3 的根治点） |
 | `test_db_flag_points_at_given_path` | `--db` 优先于环境变量，且写进 `DATABASE_URL` |
+| `test_demo_tier_numbers_are_engine_derived` | 分层 / 词重合 / 价格比必须彼此自洽且来自引擎（不是常量兜底） |
 
 ## 为什么自己造 engine，不直接复用 `app.db` 的
 
@@ -34,7 +35,10 @@
 """
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -315,3 +319,108 @@ def test_db_flag_points_at_given_path(tmp_path, monkeypatch) -> None:
     assert resolved == target.resolve(), resolved
     assert os.environ["DATABASE_URL"] == f"sqlite:///{target.resolve().as_posix()}"
     assert resolved != demo.MAIN_DB_PATH.resolve()
+
+
+# ============================================================
+# 分层数字必须由引擎算出来（不是常量兜底）
+# ============================================================
+
+
+def _run_demo_on_new_db(db_path: Path) -> subprocess.CompletedProcess:
+    """用子进程在指定库上跑一次造数（子进程的好处：settings / engine 都是全新的）。"""
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+    env["SCHEDULER_ENABLED"] = "false"
+    return subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "demo_offline.py"),
+            "--db",
+            str(db_path),
+            "--quiet",
+        ],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+
+def test_demo_tier_numbers_are_engine_derived(tmp_path) -> None:
+    """演示数据里的「分层 / 词重合 / 价格比」必须彼此自洽，且来自引擎。
+
+    缺陷背景：旧实现把 `tier` 写成场景名、把 `price_ratio` / `keyword_overlap`
+    写成常量 0.96 / 0.71，两者不同源 → 面板上 6 个竞品数字完全相同，出现
+    「C 级对手 · 词重合 71%」（真有 71% 重合，过 40% 门槛就该是 A 级以上）。
+    这类 bug **层级是对的、数字是错的**，只看 `tier` 永远发现不了，
+    所以这里直接锁数字之间的关系。
+
+    断言（刻意不写死任何阈值数值，改阈值不该让这条测试变红）：
+      1. 8 个竞品的词重合不是同一个值（常量兜底的指纹）；
+      2. 层级与词重合单调：S > A > B > C，C 接近 0；
+      3. `price_ratio` == 最新快照价 / 自家售价（说明来自快照而不是常量）；
+      4. `unknown` 那条是 `None`（判不了），不是 `0`（判过且不重合）。
+    """
+    db = tmp_path / "demo_offline.db"
+    proc = _run_demo_on_new_db(db)
+    assert proc.returncode == 0, (proc.stdout[-1500:], proc.stderr[-1500:])
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT asin, tier, keyword_overlap, price_ratio FROM competitors ORDER BY asin"
+        ).fetchall()
+        my_price = conn.execute(
+            "SELECT current_price FROM my_products ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        latest_price = dict(
+            conn.execute(
+                "SELECT c.asin, (SELECT s.price FROM snapshots s "
+                "  WHERE s.competitor_id = c.id "
+                "  ORDER BY s.captured_at DESC, s.id DESC LIMIT 1) "
+                "FROM competitors c"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+    assert len(rows) == 8, rows
+
+    by_tier: dict[str, list[float]] = {}
+    for asin, tier, kw, ratio in rows:
+        if kw is not None:
+            by_tier.setdefault(tier, []).append(float(kw))
+        # 3. 价格比必须能由快照价复算出来
+        expected = round(latest_price[asin] / my_price, 4)
+        assert abs(float(ratio) - expected) < 1e-4, (asin, ratio, expected)
+
+    # 1. 不能是常量兜底
+    all_kw = [kw for _a, _t, kw, _r in rows if kw is not None]
+    assert len(set(all_kw)) > 1, f"所有竞品词重合度相同（{all_kw}）——像是常量兜底"
+
+    # 2. 层级与词重合单调
+    for tier in ("S", "A", "B", "C"):
+        assert by_tier.get(tier), f"{tier} 级没有任何竞品：{by_tier}"
+    assert min(by_tier["S"]) > max(by_tier["A"]), by_tier
+    assert min(by_tier["A"]) > max(by_tier["B"]), by_tier
+    assert min(by_tier["B"]) > max(by_tier["C"]), by_tier
+    assert max(by_tier["C"]) < 0.2, f"C 级不该有明显词重合：{by_tier['C']}"
+
+    # 4. unknown = 判不了（None），不是判过且不重合（0）
+    assert [kw for _a, t, kw, _r in rows if t == "unknown"] == [None], rows
+
+    # 5. 对标绑定的 basis 必须与竞品行同源
+    #    （绑定是「当初凭什么判成这样」的存档，另写一份字面量就等于留了两份
+    #     互相矛盾的证据，而面板会同时展示它们）
+    conn = sqlite3.connect(db)
+    try:
+        bindings = conn.execute(
+            "SELECT competitor_id, basis FROM competitor_bindings"
+        ).fetchall()
+        stored_kw = dict(conn.execute("SELECT id, keyword_overlap FROM competitors").fetchall())
+    finally:
+        conn.close()
+    assert bindings, "演示数据里应该有对标绑定"
+    for cid, raw in bindings:
+        reasons = (json.loads(raw) if raw else {}).get("tier_reasons") or {}
+        assert reasons.get("keyword_overlap") == stored_kw[cid], (cid, reasons, stored_kw[cid])
