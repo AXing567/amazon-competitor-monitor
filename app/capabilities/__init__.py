@@ -244,12 +244,25 @@ def _param_hint(cap: Capability) -> str:
         if spec.enum:
             opt = "/".join(str(x) for x in spec.enum)
             parts.append(f"{spec.key}={opt}")
-        elif spec.required:
-            parts.append(f"{spec.key}（必填，{spec.label}）")
-        else:
-            parts.append(f"{spec.key}（选填，{spec.type}）")
+            continue
+        # 数值参数必须带上范围。只写「days（选填，int）」的话，
+        # 传了 `days=0` 的人依然不知道自己该填几，下一轮只能再猜一次。
+        span = ""
+        if spec.minimum is not None or spec.maximum is not None:
+            lo = "−∞" if spec.minimum is None else _fmt_num(spec.minimum)
+            hi = "+∞" if spec.maximum is None else _fmt_num(spec.maximum)
+            span = f"，{lo} ~ {hi}" + (f" {spec.unit}" if spec.unit else "")
+        flag = "必填" if spec.required else "选填"
+        parts.append(f"{spec.key}（{flag}，{spec.type}{span}）")
 
     return f"{cap.name} 接受的参数：" + "；".join(parts)
+
+
+def _fmt_num(value: float) -> str:
+    """把 0.001 / 500.0 这类阈值数字印成人看的样子（去掉尾随的 .0）。"""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return f"{value:g}"
 
 
 def call(name: str, *, ctx: CapContext, **kwargs: Any) -> dict:
@@ -298,6 +311,9 @@ def call(name: str, *, ctx: CapContext, **kwargs: Any) -> dict:
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
             "error_code": "handler_failed",
+            # 与 ParamError 分支对称：显式标成系统类。外层据此给"查日志/查库"的
+            # 建议，而不是让用户去改一个他根本没传错的参数。
+            "error_kind": "system",
             "capability": name,
         }
 
@@ -317,10 +333,20 @@ def safe_call(name: str, *, ctx: CapContext, **kwargs: Any) -> dict:
     try:
         return call(name, ctx=ctx, **kwargs)
     except CapabilityError as exc:
-        return {"ok": False, "error": str(exc), **(exc.payload or {})}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "error_kind": "system",
+            "error_code": exc.code,
+            **(exc.payload or {}),
+        }
     except Exception as exc:  # noqa: BLE001
         logger.exception("能力 %s 调用失败", name)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "error_kind": "system",
+        }
 
 
 # ============================================================

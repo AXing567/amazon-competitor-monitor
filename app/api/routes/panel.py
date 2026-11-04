@@ -68,7 +68,11 @@ async def _body(request: Request) -> tuple[Optional[dict], Optional[JSONResponse
     if raw is None:
         return {}, None
     if not isinstance(raw, dict):
-        return None, _json({"ok": False, "error": "请求体必须是 JSON 对象"})
+        return None, _json({"ok": False, "error": "请求体必须是 JSON 对象",
+                            "error_kind": "param",
+                            "received": type(raw).__name__,
+                            "hint": f"收到的是 {type(raw).__name__}，需要一个 JSON 对象，"
+                                    "例如 {\"asin\":\"B0...\",\"status\":\"paused\"}"})
     return raw, None
 
 
@@ -100,13 +104,20 @@ _PARAM_HINT = (
 )
 
 
-def _humanize(raw: str) -> str:
-    """把首行错误类型翻成人话。认不出来就截断原文——不假装懂。"""
+def _match_error_type(raw: str) -> Optional[str]:
+    """错误首行里能认出已知异常类型就返回人话，认不出来返回 `None`。"""
     head = (raw or "").strip().split("\n", 1)[0]
     for key, text in _HUMAN_ERRORS:
         if key in head:
             return text
-    return head[:180] or "未知错误"
+    return None
+
+
+def _humanize(raw: str) -> str:
+    """把错误翻成人话。认不出来就截断原文——不假装懂。"""
+    return _match_error_type(raw) or (
+        (raw or "").strip().split("\n", 1)[0][:180] or "未知错误"
+    )
 
 
 def _call(name: str, ctx, **kwargs) -> dict:
@@ -121,8 +132,15 @@ def _call(name: str, ctx, **kwargs) -> dict:
 
     raw = res.get("error") or ""
     out = dict(res)
-    if len(raw) > 160 or "\n" in raw:
-        # 长错误（多半带 SQL）：主文案换人话，原文折叠
+    human = _match_error_type(raw)
+    if human:
+        # 认得出异常类型：主文案换人话，原文**一律**留在 detail。
+        # 不能因为"这条只有五十个字"就放过它——面板上出现 `[SQL: SELECT ...]`
+        # 这件事本身，就说明它不是一句给人看的话，长度与可读性无关。
+        out["error"] = human
+        out["detail"] = raw
+    elif len(raw) > 160 or "\n" in raw:
+        # 认不出来但明显是堆栈/长错误：截断当主文案，原文折叠
         out["error"] = _humanize(raw)
         out["detail"] = raw
     if not out.get("hint"):
