@@ -212,6 +212,21 @@ def test_tier_label_says_provisional_only_when_provisional():
     assert "暂定" not in normal, normal
 
 
+def test_provisional_label_drops_relatedness_wording():
+    """暂定档**不许**说「强相关 / 弱相关」。
+
+    那两个词描述的是词重合这一维，而词重合正是缺的那一维。
+    真实出现过的坏样子（pilot 里第一个 A 级）：
+    `A 级 · 强相关（暂定：缺词重合）`——同一句话里既断言「强相关」，
+    又说「不知道相不相关」；读的人只会记住前半句。
+    """
+    prov = _judge_provisional()
+    label = queries_cap._tier_label(prov.effective_tier, prov.tier_reasons)
+    assert "强相关" not in label, label
+    assert "弱相关" not in label, label
+    assert prov.effective_tier in label and "暂定" in label, label
+
+
 def test_tier_label_stays_backward_compatible_for_old_callers():
     """`_tier_label(tier)` 的老调用方式必须照旧可用（现网 3 个调用点）。
 

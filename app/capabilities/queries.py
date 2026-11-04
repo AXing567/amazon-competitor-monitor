@@ -103,7 +103,11 @@ def _tier_label(tier: str, tier_reasons: Optional[dict] = None) -> str:
 
     dims = [d for d in _DIM_ORDER if d in (reasons.get("missing_dims") or [])]
     short = [_DIM_SHORT_LABELS.get(d, d) for d in dims] or ["关键维度"]
-    return f"{base}（暂定：缺{'、'.join(short)}）"
+    # 暂定时**不再报相关度定性**（「强相关」/「弱相关」）：那两个词描述的是词重合这一维，
+    # 而词重合恰恰就是缺的那一维。原样保留会出现「A 级 · 强相关（暂定：缺词重合）」——
+    # 一句话里同时说「强相关」和「不知道相不相关」，读的人只会记住前半句。
+    # 只给字母级 + 缺什么，定性留给有证据的那天。
+    return f"{tier} 级（暂定：缺{'、'.join(short)}）"
 
 
 #: 三个维度的固定顺序，与 `domain/tiering.py` 的 `DIM_ORDER` 一致。
