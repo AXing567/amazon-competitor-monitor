@@ -92,10 +92,18 @@ def build_basis_summary(
     ratio = reasons.get("price_ratio")
     if ratio is None:
         parts.append("价格数据缺失，价格带无法核对")
-    elif reasons.get("price_band_ok"):
-        parts.append(f"价格比 {ratio:.2f} 在 {th.price_ratio_min}~{th.price_ratio_max} 带内")
     else:
-        parts.append(f"价格比 {ratio:.2f} 超出 {th.price_ratio_min}~{th.price_ratio_max} 价格带")
+        # 带内用两位小数就够（方向本来就一致）；带外必须让方向看得出来，
+        # 否则 $15.99 那种会写成「价格比 0.70 超出 0.7~1.4 价格带」。见 `fmt_ratio_to_show_side`。
+        lo, hi = th.price_ratio_min, th.price_ratio_max
+        if reasons.get("price_band_ok"):
+            parts.append(f"价格比 {ratio:.2f} 在 {lo}~{hi} 带内")
+        else:
+            side = "低于下限" if ratio < lo else "高于上限"
+            parts.append(
+                f"价格比 {tiering_mod.fmt_ratio_to_show_side(ratio, lo, hi)} {side}"
+                f"（{lo}~{hi} 价格带）"
+            )
 
     overlap = reasons.get("keyword_overlap")
     if overlap is None:

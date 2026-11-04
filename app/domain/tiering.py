@@ -342,8 +342,36 @@ def _reject_reason(
         if res.price_ratio is None:
             parts.append("缺少价格数据")
         else:
+            lo, hi = th.price_ratio_min, th.price_ratio_max
+            side = "低于下限" if res.price_ratio < lo else "高于上限"
             parts.append(
-                f"价格比 {res.price_ratio:.2f} 超出 "
-                f"{th.price_ratio_min}~{th.price_ratio_max} 价格带"
+                f"价格比 {fmt_ratio_to_show_side(res.price_ratio, lo, hi)} {side}"
+                f"（{lo}~{hi} 价格带）"
             )
     return "；".join(parts) or "未通过战场判定"
+
+
+def fmt_ratio_to_show_side(value: float, lo: float, hi: float) -> str:
+    """把价格比格式化到「方向看得出来」为止。
+
+    两位小数不够。`15.99 / 22.99 = 0.6955`，`:.2f` 出来是 `0.70`，
+    而下限也是 `0.70`——于是报告里写着
+
+        价格比 0.70 超出 0.7~1.4 价格带
+
+    看起来就是系统坏了。真实数据第一次跑出来就有 4 条这样的行（全是 $15.99）。
+
+    做法：从两位小数开始，**只要四舍五入后的值和边界分不出方向，就再加一位**。
+    `0.6955` → `0.70` 和下界相等 → `0.696` 看得出更小 → 用它。
+    这样不必预设精度，也不会为了极端边界值把每条都写成 `0.69552`。
+
+    带内的值直接两位小数：它没有方向要说，2 位就是全部信息。
+    """
+    if lo <= value <= hi:
+        return f"{value:.2f}"
+    for digits in (2, 3, 4):
+        text = f"{value:.{digits}f}"
+        shown = float(text)
+        if shown < lo or shown > hi:
+            return text
+    return f"{value:.4f}"
