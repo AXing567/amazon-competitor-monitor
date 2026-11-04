@@ -82,7 +82,7 @@ DIMENSIONS: list[Dimension] = [
         ],
         why="缺库存与日均销量就算不出可售天数 DOS，进攻窗口不敢下手，跟价可能把货卖断",
         auto_fillable=False,
-        informs="可售天数 DOS、库存状态（断货/积压预警）、进攻窗口判断、补货建议",
+        informs="可售天数 DOS、库存状态判读、断货与积压预警、进攻窗口判断、补货建议",
     ),
     Dimension(
         key="finance",
@@ -94,7 +94,7 @@ DIMENSIONS: list[Dimension] = [
         ],
         why="缺保本价，跟价判断只能瞎猜；这是价格战里唯一不能妥协的红线",
         auto_fillable=True,
-        informs="跟价判断（这个价该不该跟）、提价/降价窗口、毛利测算",
+        informs="跟价判断、提价与降价窗口、毛利测算",
     ),
     Dimension(
         key="rank",
