@@ -322,6 +322,13 @@ def _save_snapshot(s: Session, competitor_id: int, snap: UnifiedSnapshot) -> Sna
         title=snap.title,
         image_url=snap.image_url,
         content_hash=snap.title,          # 用标题做轻量指纹，够用
+        # 上架日期：不写这一行，`A 级黑马`判据（上架 90 天内 + 月销过千）就只在
+        # 「采完立刻判」那一次生效，**任何一次从库里重算都会变回 B**——
+        # 周维护、面板改阈值后重算、demo 重算全走那条路，而且全程不报错。
+        # 只截 `[:10]`：列是 VARCHAR(10)，SQLite 不强制长度，但一旦迁到 PG，
+        # 带时分秒的字符串会被截断或报错；而所有消费方（tiering）本来就只取前 10 位。
+        # None 就是 None，不补空串：空串会让「这行有没有值」永远回答"有"。
+        release_date=(snap.release_date or "").strip()[:10] or None,
         # 分层判断要用的两个维度。空列表存 None 而不是 []：
         # 「没采到」（None）和「采到了但确实为空」在排查时是两件事，
         # 而 JSON 列的 `[]` 会被读成一个合法的空结果。这里两侧都当"无数据"处理，
@@ -473,6 +480,10 @@ def row_to_unified(row: Snapshot, marketplace: str = "US") -> UnifiedSnapshot:
     关于 keywords / category_path：这两列是后补的（老库里是 NULL），
     所以这里必须容忍 None。**不要**把 None 补成 `[]` 之后再存回去——
     那会把"从没采到过"写成"采到了但为空"，而这正好是本项目最忌讳的那种混淆。
+
+    关于 release_date：同样是后补的列（老库里是 NULL），也必须容忍 None。
+    它一还不上，`A 级黑马`判据（上架 90 天内 + 月销过千）就从「重算」这条路上
+    静默消失——恢复时也一样，None 保持 None，不许补成空串。
     """
     return UnifiedSnapshot(
         asin="",
@@ -494,6 +505,7 @@ def row_to_unified(row: Snapshot, marketplace: str = "US") -> UnifiedSnapshot:
         buybox_owner=row.buybox_owner,
         title=row.title,
         image_url=row.image_url,
+        release_date=row.release_date,
         category_path=list(row.category_path or []),
         keywords=list(row.keywords or []),
         data_quality=row.data_quality,

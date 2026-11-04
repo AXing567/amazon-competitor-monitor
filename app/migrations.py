@@ -84,6 +84,7 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # SQLite 里 JSON 只是带 JSON 校验钩子的 TEXT，ADD COLUMN 对它没有额外限制。
     ("snapshots", "category_path", "JSON"),       # 竞品类目路径
     ("snapshots", "keywords", "JSON"),            # 竞品流量词
+    ("snapshots", "release_date", "VARCHAR(10)"), # 上架日期 YYYY-MM-DD（黑马判据只用它）
     ("my_products", "category_path", "JSON"),     # 自家类目路径（节点维度只认它）
 
     # my_products：锚点溯源（见 models.MyProduct 第 6 节）。

@@ -241,6 +241,16 @@ class Snapshot(Base):
     image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
+    # 上架日期，ISO 字符串 `YYYY-MM-DD`。
+    # 为什么用 String(10) 而不是 Date：源头（卖家精灵选品库 / SP-API）给的本来就
+    # 是字符串，`tiering._is_new_black_horse()` 也只做 `[:10]` 解析。转成
+    # `datetime.date` 会多出一条「解析失败怎么办」的静默分支——而这个字段的失败
+    # 模式恰好是**安静地不命中 A 级黑马**（判据见 tiering 的 `_is_new_black_horse`），
+    # 没有任何报错。列宽 10 只为装下 `YYYY-MM-DD`。
+    # 不写这一列的时候，「采完立刻判」是对的、**从库里重算就全错**：
+    # 周维护、面板改阈值后重算都走重算那条路。
+    release_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+
     # 类目路径：["Toys & Games", "Toy Vehicles", "Play Trucks"]
     # 为什么要落库：分层判断的「节点」维度靠它。不存的话每次重算都要重新采一遍，
     # 而它一天只变一次——为同一个值反复消耗采集额度是最容易忽略的浪费。
