@@ -385,6 +385,92 @@ def test_simulate_direction_is_graded_and_writes_nothing():
 
 
 # ============================================================
+# ⑥b 阈值页的「这段什么意思」：能力必须真的露在面板上
+# ============================================================
+#
+# 背景：`explain_thresholds` 原本只有 REST / Agent 两个出口，面板零调用点。
+# 对"只看面板"的主要用户，这个能力等于不存在——而阈值页最容易犯的错恰恰是
+# "用户不知道这串数字意味着什么"。所以这一组用例把接线钉死，防止被删回去。
+
+
+def test_config_view_wires_explain_lazily_and_with_product_id():
+    """静态断言：`config.js()` 真的接了 explain，且是懒加载、且带 `my_product_id`。"""
+    from app.web.views import config as config_view
+
+    src = config_view.js()
+
+    # 1) 真的请求了这个能力
+    assert "/api/config/thresholds/explain" in src, (
+        "阈值页没有接 explain——这个能力又变回只有 REST/Agent 能碰，"
+        "对只看面板的用户等于不存在"
+    )
+
+    # 2) 懒加载：只能挂在 details 的 toggle 上，不能塞进 register('config')
+    assert '<details class="exp" data-explain=' in src, "说明区不是可展开/收起的块"
+    assert "addEventListener('toggle'" in src, (
+        "说明区不是展开才加载——三个分组会把接口预拉三次"
+    )
+    register_block = re.search(r"register\('config',[\s\S]*?\n\}\);", src)
+    assert register_block, "找不到 register('config')，用例失效"
+    assert "explain" not in register_block.group(0), (
+        "配置页在 register 里预拉了说明——懒加载退化，每次打开这一屏多打三次接口"
+    )
+
+    # 3) 拼 URL 时必须带 my_product_id（这是防回退的核心）
+    fn = re.search(r"async function cfgExplain\(group\)\{([\s\S]*?)\n\}", src)
+    assert fn, "找不到 cfgExplain，用例失效"
+    body = fn.group(1)
+    assert "my_product_id=" in body, (
+        "explain 的 URL 没带 my_product_id——说明就只剩公司层，"
+        "设过产品层覆盖的人会看到「不是当前生效的值」，还以为是系统算错"
+    )
+    assert "CFG.ctx.my_product_id" in body, "my_product_id 应取面板上下文里的锚点"
+    assert "CFG.scope" not in body, (
+        "my_product_id 不该跟 CFG.scope 走：芯片选的是「你要改哪一层」，"
+        "而这段说明讲的是「当前实际生效的是哪一层」"
+    )
+
+    # 4) 个人覆盖必须单独渲染，不能只靠 text 里那句 ⚠
+    assert "personal_overrides_not_applied" in body, (
+        "个人覆盖只塞在 text 里了——用户扫一眼看不到「我设的 3% 没生效」，"
+        "而这正是他这个人在本屏最该知道的一件事"
+    )
+    assert "warnbox" in body and "产品层或公司层" in body, "警示行没写「怎么才能让它生效」"
+
+
+def test_explain_endpoint_works_with_and_without_product_id():
+    """活调一次：带与不带 `my_product_id` 都必须 200 + ok，且来源层如实。"""
+    ctx = _get("/api/panel/context")
+    my_id = ctx.get("my_product_id")
+    schema = _get("/api/config/thresholds/schema")
+    diff_keys = {i["key"] for g in schema["groups"] if g["group"] == "diff" for i in g["items"]}
+
+    # --- 不带 my_product_id：空库/无锚点也必须能看 ---
+    plain = _get("/api/config/thresholds/explain?group_name=diff")
+    assert plain["ok"] is True, plain
+    assert plain["my_product_id"] is None, plain
+    assert set(plain["effective"]) == diff_keys, "说明的键集与 schema 不一致"
+    assert "（当前生效）" in plain["text"].splitlines()[0], plain["text"]
+    # diff 组不含个人层：没传身份时当然也不该有
+    assert plain["personal_layer_applied"] is False, plain
+    assert plain["personal_overrides_not_applied"] == [], plain
+    assert all(v in ("company", "product", "default") for v in plain["sources"].values()), (
+        f"diff 的来源层里出现了个人层：{plain['sources']}"
+    )
+
+    # --- 带 my_product_id：产品层覆盖要能在说明里看见 ---
+    if not my_id:                 # 演示库一定锚好了；真没有就只验上面那条
+        return
+    with_pid = _get(f"/api/config/thresholds/explain?group_name=diff&my_product_id={my_id}")
+    assert with_pid["ok"] is True, with_pid
+    assert with_pid["my_product_id"] == my_id, with_pid
+    assert set(with_pid["effective"]) == diff_keys, "带锚点后键集不该变"
+    assert "user" not in set(with_pid["sources"].values()), (
+        "diff 组把个人层算进了「当前生效」——D5 复发"
+    )
+
+
+# ============================================================
 # ⑦ 错误路径：永远 200 + ok:false + 人话
 # ============================================================
 

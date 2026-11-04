@@ -308,13 +308,16 @@ def explain_thresholds(
     之所以要有它，是因为面板上如果只显示一串数字，老板不会知道
     `price_p1_pct = 0.03` 到底意味着「降 3% 会进日报」还是「会推送飞书」。
 
+    出口有两个，都已接上：面板阈值页用它渲染每组下面的「这段什么意思」折叠区
+    （`app/web/views/config.py` 的 `cfgExplain`），Agent 走能力注册表。
+
     ## 为什么 diff / tiering 组要剔掉个人层（D5 的第二个出口）
 
     原来这里一律 `resolve(tenant, user_id=ctx.user_id)`，于是只要库里有一条
     `scope="user"` 的 diff 覆盖，就会输出「价格 P0 阈值：0.03（来自个人覆盖）」，
     而标题写的是「当前生效」——但 diff 组的个人层**根本不生效**（生产采集只读
     company + product）。这和 D5 是同一个谎，只是换了出口：试算已经不说谎了，
-    这段人话还在说谎，而它正是面板拿来当帮助文案的。
+    这段人话还在说谎，而它正是用户在面板上读到的唯一一段解释。
 
     所以：`diff` / `tiering` 里被个人层接管的键，**回落到下一层**（company / default）
     并在 `personal_overrides_not_applied` 里单列出来，别让它们静默消失；
@@ -365,11 +368,12 @@ def explain_thresholds(
             f"{labels.get(o['key'], o['key'])} {o['value']}"
             for o in personal_overrides_not_applied
         )
-        title = GROUP_TITLES.get(group_name, group_name)
+        # 这句话里刻意用**分组代码名**（diff / tiering）而不是中文长标题：
+        # 中文标题在标题行已经出现过一次，这里再重复两遍会读成一句绕口令。
         lines.append("")
         lines.append(
             f"⚠ 你有 {len(personal_overrides_not_applied)} 项个人覆盖（{detail}）"
-            f"不参与{title}的判断——{title}对所有人生效的是同一套阈值，"
+            f"不参与 {group_name} 判断——{group_name} 对所有人生效的是同一套阈值，"
             "个人层只影响「打扰节奏」（这条信号要不要推给你）。"
             f"想让 {personal_overrides_not_applied[0]['value']} 真正生效，"
             "请改产品层或公司层。"

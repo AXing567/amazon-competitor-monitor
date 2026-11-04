@@ -24,6 +24,22 @@ QA 实测：把 `price_p0_pct` 从 0.03 收到 0.5，`total` 完全不变——�
 试算为了拿到变化，每个竞品会多算一对基线（窗口前一条 + 窗口内第一条）。
 写"对比次数"会被人拿去和"快照数 - 1"核对，然后发现对不上而怀疑算错。
 「样本数」是这一屏唯一不会引发这种误会的中性说法。
+
+## 为什么每组下面有个「这段什么意思」折叠区
+
+阈值页最容易犯的错不是算错，而是**用户不知道这串数字意味着什么**：
+`price_p1_pct = 0.03` 到底是"降 3% 进日报"还是"降 3% 会推送飞书"。
+`explain_thresholds` 就是为这件事存在的，但一个只有 REST / Agent 碰得到的能力，
+对"只看面板"的主要用户等于不存在——所以把它挂到每一组下面。
+
+三条设计约束：
+- **懒加载**：`<details>` 展开时才请求。三个分组预拉等于每次打开这一屏多打三次接口，
+  而多数人只关心自己正在改的那一组。
+- **`my_product_id` 有就带**：它决定"当前**实际生效**的是哪一层"，与顶部
+  "你要改哪一层"的芯片是两件事，所以不跟 `CFG.scope` 走。
+- **`personal_overrides_not_applied` 单独渲染**：后端已经把它塞进 `text` 里了，
+  但让人去一段文字里找那句"你设的 3% 没生效"是不现实的——这是这个人在这一屏
+  最该看见的一件事，所以必须是一条独立的警示行。
 """
 from __future__ import annotations
 
@@ -118,6 +134,10 @@ function cfgRender(){
           <button class="btn" data-act="reset" data-group="${esc(g.group)}">放弃改动</button>
           <button class="btn" data-act="versions" data-group="${esc(g.group)}">版本历史 / 回滚</button>
         </div>
+        <details class="exp" data-explain="${esc(g.group)}">
+          <summary>这段什么意思？</summary>
+          <div id="cfg-expl-${esc(g.group)}"></div>
+        </details>
         <div id="cfg-warn-${esc(g.group)}"></div>
         <div id="cfg-ver-${esc(g.group)}"></div>
       </div>`;
@@ -126,6 +146,14 @@ function cfgRender(){
   $$('#cfg-groups [data-act]').forEach(btn => {
     // 保存 / 试算 / 版本历史三个动作都走 cfgAction，这里统一兜异常。
     btn.onclick = act(() => cfgAction(btn.dataset.act, btn.dataset.group));
+  });
+  $$('#cfg-groups details[data-explain]').forEach(d => {
+    // 懒加载：只在**展开**时请求。收起时什么都不发。
+    // 用 toggle 事件而不是 onclick：点 summary、按回车、键盘空格都能触发，
+    // 而 onclick 只覆盖鼠标点击——键盘用户会打不开说明。
+    d.addEventListener('toggle', () => {
+      if (d.open) cfgExplain(d.dataset.explain);
+    });
   });
   $$('#cfg-groups input').forEach(inp => {
     inp.oninput = () => {
@@ -157,6 +185,69 @@ function cfgFieldRow(group, it){
       <div class="src">当前来自 ${esc(srcText)}</div>
     </div>
   </div>`;
+}
+
+// 「这段什么意思」：把 explain_thresholds 翻译好的那几行铺出来。
+// 展开才请求，收起不请求；同一个 details 反复展开就反复取——阈值随时可能被别人改，
+// 缓存一份只会让这段说明变成"上一次的答案"。
+async function cfgExplain(group){
+  const out = $('#cfg-expl-' + group);
+  if (!out) return;
+  // my_product_id 只要有锚点就带：这段说明讲的是「当前**实际生效**的是哪一层」，
+  // 与顶部"你要改哪一层"的芯片无关——跟着那个芯片走，会让只看公司层的人
+  // 看不到自己产品上的覆盖，说明就成了半截话。
+  // （测试里对此有防回退断言：`cfgExplain` 的函数体不许出现那个芯片变量。）
+  const pid = CFG.ctx && CFG.ctx.my_product_id;
+  let url = '/api/config/thresholds/explain?group_name=' + encodeURIComponent(group);
+  if (pid) url += '&my_product_id=' + encodeURIComponent(pid);
+
+  out.innerHTML = '<div class="dim">正在取当前生效的阈值…</div>';
+  let res;
+  try {
+    res = await api(url);
+  } catch (e) {
+    // 这一块的加载失败不该顶掉整屏（其余表单是好的）：就地说明，再展开一次即重试。
+    const hint = (e && e.hint) ? '（' + e.hint + '）' : '';
+    out.innerHTML = '<div class="note">这段说明没取到：' +
+      esc((e && e.message) ? e.message : String(e)) + esc(hint) +
+      '<br>其它区域不受影响；把这段收起再展开可以重试。</div>';
+    return;
+  }
+
+  // 个人覆盖**单独一条**，不要只指望用户去 text 里发现那句 ⚠。
+  // "我设的 3% 没生效"是这个人在这一屏最该看见的一件事。
+  const notApplied = res.personal_overrides_not_applied || [];
+  const labels = {};
+  ((CFG.schema.groups.find(g => g.group === group) || {}).items || []).forEach(it => {
+    labels[it.key] = it.label;
+  });
+  const SRC_TITLE = {company: '公司默认', product: '产品覆盖', user: '个人覆盖', default: '系统默认'};
+  const effective = res.effective || {}, sources = res.sources || {};
+  const personalWarn = notApplied.length
+    ? '<div class="warnbox"><b>⚠ 你有 ' + num(notApplied.length) + ' 项个人覆盖，在本组不生效</b><br>' +
+      notApplied.map(o => '· ' + esc(labels[o.key] || o.key) + '：你设的是 <code>' +
+        esc(o.value) + '</code>，实际判定用 <code>' + esc(effective[o.key]) + '</code>' +
+        '（来自' + esc(SRC_TITLE[sources[o.key]] || '系统默认') + '）').join('<br>') +
+      '<br>原因：<code>' + esc(group) + '</code> 这一组对所有人生效的是<b>同一套阈值</b>' +
+      '（一轮采集只跑一遍，不可能按人各跑一套），个人层只影响「这条信号要不要推给你」。' +
+      '想让你的值真正生效，请改<b>产品层或公司层</b>。</div>'
+    : '';
+
+  // 口径一句话：diff / tiering 不含个人层，notify 含——这就是 D5 的裁定。
+  const judgmentGroup = (group === 'diff' || group === 'tiering');
+  const scopeLine = judgmentGroup
+    ? '<div class="note">口径：本组只算<b>公司默认 + 产品覆盖</b>——它对所有人是同一套值，' +
+      '个人层不参与判定。</div>'
+    : '<div class="note">口径：本组<b>计入个人覆盖</b>——它决定「这条信号要不要推给你」，' +
+      '属于个人差异。</div>';
+
+  // 逐行渲染（后端已经排好版），保留空行当分段。
+  // 不整段塞进一个 div 靠 white-space 硬撑：窄屏上会变成一大坨没法扫读的文字墙。
+  const body = String(res.text || '').split('\n').map(line => line.trim()
+    ? '<div style="padding:2px 0;white-space:pre-wrap">' + esc(line) + '</div>'
+    : '<div style="height:8px"></div>').join('');
+
+  out.innerHTML = scopeLine + personalWarn + body;
 }
 
 async function cfgAction(act, group){
@@ -271,7 +362,8 @@ async function cfgSimulate(group){
       ${scopeNote}
       <div class="note">
         「当前」这一列是拿<b>现在生效的阈值</b>把历史重算一遍，<b>不等于看板上那个数</b>。
-        两者条数不同是正常的：看板显示的是当时那条信号被判成的等级，而阈值可能在这之后被改过。
+        两者条数不同是正常的：看板显示的是<b>当时</b>那条信号被判成的等级，而阈值可能在这之后被改过，
+        也可能这条信号是在旧规则下产生的。这是两个时间视角，不是算错。
         想核对某个具体竞品，去它的变化历史里看当时的分级。
       </div>
       <div class="simrow"><div class="head">等级</div><div class="head">当前</div>
