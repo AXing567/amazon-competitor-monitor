@@ -13,11 +13,14 @@
 
 原始返回已经落盘在 `data/pilot_raw/*.json`，由 `scripts/bridge_probe.py` 拉的：
 
-    # 按类目节点选品（Dish Racks，节点路径由 /market/research 给出）
-    python scripts/bridge_probe.py get --path /api/v1/product/filter \
-      --param node_id_path=1055398:284507:510136:23691552011:695483011 \
-      --param min_price=18 --param max_price=36 --param min_sales=300 \
-      --param size=100 --param order_field=bsr --param order_desc=false --param page=3
+    # 按类目节点选品（Dish Racks，节点路径由 /market/research 给出），翻 5 页
+    for page in 1 2 3 4 5; do
+      python scripts/bridge_probe.py get --path /api/v1/product/filter \
+        --tag filter_band_p$page \
+        --param node_id_path=1055398:284507:510136:23691552011:695483011 \
+        --param min_price=18 --param max_price=36 --param min_sales=300 \
+        --param size=100 --param order_field=bsr --param order_desc=false --param page=$page
+    done
 
 本脚本只读这些文件，**不再打网络**。原因有两个：额度是共享的、每次重跑都烧一次；
 以及「跑出来的结论要能回溯到当时的原始返回」——只存映射后的快照是回溯不回去的。
@@ -44,6 +47,20 @@
 - 只能暂定：S/A/B/C 的字母档。词重合缺一维，`judge_tier` 会给「中间档 B + 暂定」，
   面板上必须读成「暂定 B」，不能读成「轻度重合」
 - 不能用：断货预警、提价/降价空间、补货建议（依赖假设值）
+
+## 观察窗口（采样偏差，必须知道）
+
+候选不是「该节点的全部商品」，而是**这几次拉取的窗口**：
+
+- `filter_dishracks_100.json`：按销量降序第 1 页（100 行）——头部 listing 的变体占满整页；
+- `filter_dishracks_band.json` + `filter_band_p2..p5`：**带 $18~$36 价格窗**、按 BSR 升序翻 5 页
+  （这个价格窗是探查阶段为了看中腰部而加的，不是判定规则）；
+- `filter_dishracks.json`：按 BSR 降序第 1 页（20 行），补低价端的尝试。
+
+后果：**低于约 $16.78 的低价段没有被系统采样**。所以
+「本轮没有低价冲击型竞品」这句话只能读成「窗口里没有」，不能读成「市场上没有」。
+要消掉这个偏差，得补一页「按价格升序、不带价格窗」的拉取——bridge 停着的时候没做成，
+留作下一轮第一件事。
 
 ## 这一轮跑不出「变化」
 
@@ -185,7 +202,7 @@ from app.models import (                                          # noqa: E402
     Signal,
     Snapshot,
 )
-from app.services import collector, pool, settings_store           # noqa: E402
+from app.services import binding, collector, pool, settings_store  # noqa: E402
 
 
 # ============================================================
@@ -349,8 +366,11 @@ def _pick_candidates(items: list[dict], anchor_asin: str, limit: int) -> list[di
             continue
         if (_to_int(item.get("monthly_sales")) or 0) < MIN_MONTHLY_SALES:
             continue
+        # BSR 缺失的行直接跳过：`bsr_rank is None` 说明这条数据本身残缺，
+        # 拿它去满足「有观察价值」这个前提就是在猜（第一版写的是 `is not None and ...`，
+        # 于是缺排名的行一路放行）。
         bsr = _to_int(item.get("bsr_rank"))
-        if bsr is not None and bsr > MAX_BSR:
+        if bsr is None or bsr > MAX_BSR:
             continue
         usable.append(item)
 
@@ -387,9 +407,6 @@ def _anchor_fields(item: dict) -> dict:
     daily = round((_to_int(item.get("monthly_sales")) or 0) / 30, 1)
 
     break_even = round(price * (1 - margin), 2) if price > 0 and 0 < margin < 1 else None
-    # 库存与补货周期纯拍：按「日均销量 × 45 天」给一个能算出 DOS 的量，
-    # 目的只是让 DOS 这条链路跑起来，数值本身没有任何依据。
-    stock_units = int(round(daily * 45)) if daily > 0 else None
 
     fields = {
         "asin": str(item.get("asin") or "").upper(),
@@ -403,7 +420,12 @@ def _anchor_fields(item: dict) -> dict:
         "target_margin_rate": 0.25,
         "break_even_price": break_even,
         "daily_sales_avg": daily or None,
-        "fba_available_units": stock_units,
+        # FBA 可售库存**刻意留空**。第一版这里填的是「日均 × 45 天」，
+        # 于是 DOS 恒等于 45.0、`inventory_status` 恒为 `normal`——
+        # 一个由分子分母反推出来的数字，看起来像"查到的库存"，实际上等于什么都没说，
+        # 而且它会稳定地把「库存正常」印在面板上。宁可 unknown：
+        # `inventory_status="unknown"` 会如实告诉人"这条判断现在做不了"。
+        "fba_available_units": None,
         "lead_time_days": 35,
         # 关键词：该账号关键词模块无权益，一首都拿不到。留空 → 词重合恒 None。
         "core_keywords": None,
@@ -411,7 +433,6 @@ def _anchor_fields(item: dict) -> dict:
         "assumed_fields": [
             "break_even_price",
             "target_margin_rate",
-            "fba_available_units",
             "lead_time_days",
             "daily_sales_avg",
         ],
@@ -425,7 +446,16 @@ def _write_anchor(item: dict) -> dict:
     res = pool.update_baseline(settings.tenant_id, **fields)
     if not res.get("id"):
         raise SystemExit(f"锚点写入失败：{res}")
-    return res
+
+    # `update_baseline` 对 `None` 的语义是**「这一项不改」**，不是「清空」。
+    # 于是「上一版写进去的假设库存」不会被这版的 None 擦掉：重跑时 DOS 会继续
+    # 用上一次编的数字算出来，而它看起来和真的一样。显式清一次，并把体检结果
+    # 重取一遍（`res` 里那些派生值已经过期了）。
+    with get_session() as s:
+        my = s.get(MyProduct, int(res["id"]))
+        if my is not None and my.fba_available_units is not None:
+            my.fba_available_units = None
+    return pool.get_my_product(settings.tenant_id) or res
 
 
 # ============================================================
@@ -574,6 +604,24 @@ def _write_one(
         s.add(comp)
         s.flush()
         collector._save_snapshot(s, comp.id, snap)      # noqa: SLF001 生产入口，故意复用
+        comp_id = int(comp.id)
+    # 绑定必须**等上面的事务提交之后**再写：`binding.upsert_from_judgment()` 自己开一个
+    # 新 session，而那时候竞品行还没 commit——它会查不到这个竞品，返回
+    # `{"ok": False, "error": "竞品 #N 不存在"}`，然后被忽略。第一版就是这样：
+    # 池子里 17 个竞品，绑定表 0 条，全程没有任何报错。
+    bind_res = binding.upsert_from_judgment(
+        tenant_id=settings.tenant_id,
+        competitor_id=comp_id,
+        my_product_id=my.id,
+        tier=res.effective_tier,
+        tier_reasons=res.tier_reasons,
+    )
+    summary["binding_id"] = bind_res.get("binding_id")
+    summary["basis_summary"] = bind_res.get("basis_summary")
+    if not bind_res.get("ok"):
+        # 不静默：绑定写不进去，面板的「战场」列和「人话理由」就是空的，
+        # 而报告里却有理由——两边说的不是一回事。
+        summary["binding_error"] = bind_res.get("error")
     return summary, res, True
 
 
@@ -676,6 +724,8 @@ def _print_report(anchor: dict, rows: list[dict], captured_at: datetime) -> None
     print("  本轮没有变化信号：只有一轮快照，没有前后对比；变化检测要等第二轮采集，")
     print("        且那时必须有促销接口确认到手价，否则价格维度按规则直接失效（宁可漏报）")
     print("  退货率上无处可落（数据模型没有这一列），本轮不参与任何判断")
+    print("  采样窗口 按销量第 1 页 + $18~$36 带内按 BSR 5 页：**低于约 $16.78 的低价段没被采样**，")
+    print("       所以「池子里没有低价冲击品」只能读成「窗口里没有」，不能读成「市场上没有」")
 
 
 def _tier_order(tier: str) -> int:
