@@ -28,13 +28,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.agent import llm
 from app.api.dashboard import DASHBOARD_HTML
+from app.api.deps import resolve_ctx
 from app.api.routes import api_router
+from app.capabilities.types import SOURCE_SYSTEM
 from app.channels.feishu import (
     decrypt_event,
     get_feishu,
@@ -146,8 +148,25 @@ class AddCompetitorBody(BaseModel):
 
 
 @app.post("/api/competitors")
-def api_add_competitor(body: AddCompetitorBody) -> dict:
-    return pool.add_competitor(settings.tenant_id, body.asin, force=body.force)
+def api_add_competitor(
+    body: AddCompetitorBody,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> dict:
+    """加入竞品池。
+
+    这是**写路径**，所以必须记下「谁加的」：`competitor_bindings.user_id` 是
+    预警按人分发的唯一依据，记错了（落到默认用户）等于给这条竞品配了一个假负责人。
+    以前这里直调 `pool.add_competitor(settings.tenant_id, ...)`，身份在这一跳就丢了。
+
+    `source` 用 `SOURCE_SYSTEM` 而不是 `SOURCE_PANEL`：本端点是**老端点，外部脚本还在用**
+    （见模块文档），触发方式是脚本而不是人点面板——记成 panel 会让「谁在什么时候
+    加了竞品」这条线索指向一个根本没点过的人。来源只影响 `collect_runs.trigger`
+    与动作留痕，不影响任何业务判断。
+    """
+    ctx = resolve_ctx(x_user_id, source=SOURCE_SYSTEM)
+    return pool.add_competitor(
+        ctx.tenant_id, body.asin, force=body.force, user_id=ctx.user_id
+    )
 
 
 class BaselineBody(BaseModel):

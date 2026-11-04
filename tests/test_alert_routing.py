@@ -436,3 +436,60 @@ def test_unknown_operator_still_falls_back_to_default_user(
     row = _binding_of(int(res["competitor_id"]))
     assert row is not None
     assert row.user_id == default_id, "身份缺失时应兜底到默认用户，且必须真的落库"
+
+
+# ============================================================
+# ⑤ 老 REST 端点（POST /api/competitors）也不能丢身份
+# ============================================================
+
+
+def test_rest_add_competitor_records_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """面板/脚本走的 `POST /api/competitors` 同样要把 `X-User-Id` 记进绑定。
+
+    **修之前这条是红的**，而且红的样子很安静：端点原先是
+    `pool.add_competitor(settings.tenant_id, body.asin, force=body.force)`，
+    请求头里的 `X-User-Id` 从头到尾没人读，绑定又落回默认用户（老板）。
+    于是「谁加的竞品」在库里永远是老板——能力层修好了，这条老端点还在记假人。
+
+    为什么必须打桩 `fetch_snapshot`：`pool.add_competitor` 里 `force` **只影响
+    是否放行四同法则的否决**，采集发生在它之前（`asyncio.run(SellerSpriteAdapter()
+    .fetch_snapshot(...))` 无条件执行），所以 `force=True` 一样会联网。测试不许依赖网络。
+    """
+    # 延迟导入：`app.api.server` 在 import 期会建 FastAPI 实例并 basicConfig，
+    # 放在用例内导，避免影响本模块其它用例的日志与 import 顺序。
+    from fastapi.testclient import TestClient
+
+    from app.api.server import app as fastapi_app
+
+    tenant = settings.tenant_id          # 端点的租户来自 resolve_ctx 的默认值
+    boss = identity.ensure_default_user(tenant)
+    default_id = identity.default_user_id(tenant)
+    _seed_my_product(tenant)
+
+    caller = identity.create_user("面板张三", tenant_id=tenant)
+    caller_id = int(caller["id"])
+    assert default_id == int(boss["id"]), "前置：兜底用户是 owner 老板"
+    assert caller_id != default_id, "前置：调用人必须与兜底用户不同，否则断言恒真"
+
+    monkeypatch.setattr(SellerSpriteAdapter, "fetch_snapshot", _fake_fetch_async)
+
+    # 不用 `with TestClient(...)`：不触发 lifespan，因而不启动调度器（同 QA 用例的做法）。
+    client = TestClient(fastapi_app)
+    resp = client.post(
+        "/api/competitors",
+        json={"asin": "B0REST0001", "force": True},
+        headers={"X-User-Id": str(caller_id)},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data.get("ok") is True, data
+
+    row = _binding_of(int(data["competitor_id"]))
+    assert row is not None, "入池应同时建立一条对标绑定"
+    assert row.user_id == caller_id, (
+        f"REST 端点把绑定记成了 user_id={row.user_id}，应为请求头里的调用人"
+        f"（{caller_id}）。等于 {default_id} 说明 X-User-Id 又没被读、被兜底成默认用户"
+    )
+    assert row.user_id != default_id
