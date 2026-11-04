@@ -92,6 +92,26 @@ class MyProduct(Base):
     image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     bullet_points: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # --- 6. 溯源：这些数是从哪来的 ---
+    # 锚点里的字段**信誉不一样**：`current_price` / `rating` / `review_count` /
+    # `sub_category_rank` 可以是查来的真实公开数据；`break_even_price` /
+    # `fba_available_units` / `lead_time_days` 是卖家自己的账，任何外部数据源都给不出，
+    # 只能先填假设值。两者混在同一张表里、面板上一视同仁地显示，一个月后没人分得清
+    # 哪个数是查来的、哪个是拍的——而「由拍出来的保本价推导出的提价建议」
+    # 会看起来和真的一样。
+    #
+    # `source`：整个锚点的来源档位。manual / sellersprite_proxy / sp_api。
+    # pilot 期没有 SP-API，用 `sellersprite_proxy` 明确标出「这是拿别人家的公开数据冒充自家」。
+    source: Mapped[str] = mapped_column(String(24), default="manual")
+
+    # `assumed_fields`：哪几个字段是**假设值**而不是查到的值（字段名列表，
+    # 如 ["break_even_price", "fba_available_units"]）。
+    # 为什么不靠 `source` 一栏包打天下：同一个锚点里 price 是真的、break_even 是假的，
+    # 单一 source 会把两者混为一谈，而它们承载的结论完全不是一个可信度。
+    # 刻意只到这一粒度：不做逐字段血缘表——pilot 要的是「这句话能不能拿去决策」，
+    # 不是一套审计系统。
+    assumed_fields: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

@@ -100,7 +100,12 @@ def _autofill(my_id: int) -> list[str]:
 
 
 def update_baseline(tenant_id: Optional[str], **fields) -> dict:
-    """更新自家锚点。只接受白名单字段。"""
+    """更新自家锚点。只接受白名单字段。
+
+    `source` / `assumed_fields` 必须在这张白名单里：下面的循环对未声明的键
+    **静默 `continue`**，所以漏掉任何一个，调用方传了也白传——
+    而且不会有任何报错，只会在面板上看到"这个锚点看起来全是查来的"。
+    """
     tenant_id = tenant_id or settings.tenant_id
 
     allowed = {
@@ -118,7 +123,27 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
         "image_url",
         "core_keywords",
         "category_path",
+        # 溯源两列（见 models.MyProduct 第 6 节）
+        "source",
+        "assumed_fields",
     }
+
+    # `assumed_fields` 的形状校验：这里再挡一道，是因为本函数还有能力层之外的
+    # 两个调用方（`app/api/server.py`、`scripts/set_baseline.py`）。
+    # 校验规则本身在 `domain.baseline`，与能力层共用同一份实现，消息不会分叉。
+    normalized_assumed = None
+    if fields.get("assumed_fields") is not None:
+        try:
+            normalized_assumed = baseline_mod.coerce_assumed_fields(
+                fields["assumed_fields"]
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "error_kind": "param",
+                "hint": baseline_mod.ASSUMED_FIELDS_HINT,
+            }
 
     updated: list[str] = []
     with get_session() as s:
@@ -139,6 +164,10 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
         for k, v in fields.items():
             if k not in allowed or v is None:
                 continue
+            if k == "assumed_fields":
+                v = normalized_assumed if normalized_assumed is not None else []
+            elif k == "source":
+                v = str(v).strip().lower() or baseline_mod.SOURCE_MANUAL
             setattr(my, k, v)
             updated.append(k)
 
@@ -151,6 +180,17 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
             if inferred and not my.break_even_price:
                 my.break_even_price = inferred
                 updated.append("break_even_price(按毛利率推算)")
+                # 推算出来的保本价**就是假设值**，必须自己承认。
+                # `out["inferred"]` 只在这一刻存在，落库之后没人再记得它是算出来的；
+                # 而保本价往下直接决定「该不该跟价」「要不要提价」这两个不能再错的动作。
+                # 以前这里只是把结果塞进库里，锚点体检会把它当成实测值——正是本轮
+                # 要消灭的「看着像证据的字段」。
+                assumed = baseline_mod.read_assumed_fields(my.assumed_fields)
+                if "break_even_price" not in assumed:
+                    assumed.append("break_even_price")
+                    my.assumed_fields = assumed
+                    if "assumed_fields" not in updated:
+                        updated.append("assumed_fields(自动标注：break_even_price)")
 
         out = _my_to_dict(my)
         out["updated_fields"] = updated
@@ -522,6 +562,12 @@ def _my_to_dict(my: MyProduct) -> dict:
     return {
         "id": my.id,
         "asin": my.asin,
+        # 溯源两列必须透出来：面板拿不到就没法区分「查来的」和「拍的」，
+        # 这件事就退化成"只在库里存在"——下次有人只看面板，照样会把假设值当真值。
+        # `source` 兜底成 manual：这一列上线前写的行是 NULL（迁移只 ADD COLUMN，
+        # 不改写历史数据），而那些行确实既非反推也非 SP-API 同步。
+        "source": my.source or baseline_mod.SOURCE_MANUAL,
+        "assumed_fields": list(a.assumed_fields),
         "current_price": my.current_price,
         "break_even_price": my.break_even_price,
         "target_margin_rate": my.target_margin_rate,

@@ -32,6 +32,7 @@ from app.capabilities.types import (
     T_STR,
 )
 from app.db import get_session
+from app.domain import baseline as baseline_mod
 from app.domain.thresholds import GROUPS
 from app.models import Competitor, SeasonCalendar
 from app.services import (
@@ -124,6 +125,11 @@ def set_baseline(ctx: CapContext, **kwargs) -> dict:
     先挡一道"锚点还不存在且没给 asin"：`MyProduct.asin` 是 NOT NULL，
     直接走到 L3 会撞出一条 `IntegrityError: NOT NULL constraint failed`，
     而那句话对用户毫无意义。校验放在这里属于参数完整性检查，不是业务判断。
+
+    `source` / `assumed_fields` 是本轮新增的两个参数，用来回答
+    「这个锚点里的数哪些是查来的、哪些是拍的」。它们**必须同时出现在
+    `CAPABILITIES` 的 params 里**：`_coerce_params` 只认声明过的键，
+    未声明的会被静默丢掉——传了也白传，且没有任何报错。
     """
     fields = {k: v for k, v in (kwargs or {}).items() if v is not None}
     if not fields.get("asin") and pool.get_my_product(ctx.tenant_id) is None:
@@ -169,6 +175,35 @@ def set_baseline(ctx: CapContext, **kwargs) -> dict:
             str(k): (float(v) / 100.0 if float(v) > 1 else float(v))
             for k, v in kws.items()
         }
+
+    # 溯源两列。形状/取值不对当场拒，理由和 category_path 一样：
+    # 坏值进了库不会报错，只会在**以后每一次体检**里安静地少说一句
+    # 「这些字段是假设的」——而那句话正是这件事的全部目的。
+    src = fields.get("source")
+    if src is not None:
+        src = str(src).strip().lower()
+        if src not in baseline_mod.ANCHOR_SOURCES:
+            return {
+                "ok": False,
+                "error": f"source 只能是 {'/'.join(baseline_mod.ANCHOR_SOURCES)}，"
+                         f"收到 {src!r}",
+                "error_kind": "param",
+                "hint": "manual=手工填；sellersprite_proxy=用卖家精灵反推（pilot 期）；"
+                        "sp_api=SP-API 同步。拿不准就填 manual。",
+            }
+        fields["source"] = src
+
+    assumed = fields.get("assumed_fields")
+    if assumed is not None:
+        try:
+            fields["assumed_fields"] = baseline_mod.coerce_assumed_fields(assumed)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "error_kind": "param",
+                "hint": baseline_mod.ASSUMED_FIELDS_HINT,
+            }
 
     res = pool.update_baseline(ctx.tenant_id, **fields)
     if isinstance(res, dict):
@@ -527,6 +562,21 @@ CAPABILITIES: tuple[Capability, ...] = (
                 "category_path", "自家类目路径", T_JSON,
                 help='从根到叶的列表，例如 ["Toys & Games", "Toy Vehicles", "Play Trucks"]。'
                      "分层判断的「节点」维度只认它",
+            ),
+            # 下面两个是「这个锚点能不能拿去决策」的开关。
+            # 不声明它们的话，`_coerce_params` 会把传进来的值静默丢掉
+            # （只认 params 里声明过的键），于是库里的 source 永远是默认值，
+            # 而面板照旧把假设值当真值显示——事情看着"做完了"，实际一步都没通。
+            _p(
+                "source", "锚点来源", T_ENUM, enum=list(baseline_mod.ANCHOR_SOURCES),
+                help="manual=手工填 / sellersprite_proxy=卖家精灵反推（pilot 期）/ "
+                     "sp_api=SP-API 同步。决定面板上这个锚点该被信到什么程度",
+            ),
+            _p(
+                "assumed_fields", "假设值字段清单", T_JSON,
+                help='哪些字段是假设值而不是查到的，例如 '
+                     '["break_even_price", "fba_available_units"]。'
+                     "填了它，锚点体检会明确告警「哪些结论不可信」；不填等于声称全是实测",
             ),
         ),
         handler=set_baseline,

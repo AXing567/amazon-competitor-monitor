@@ -85,6 +85,16 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("snapshots", "category_path", "JSON"),       # 竞品类目路径
     ("snapshots", "keywords", "JSON"),            # 竞品流量词
     ("my_products", "category_path", "JSON"),     # 自家类目路径（节点维度只认它）
+
+    # my_products：锚点溯源（见 models.MyProduct 第 6 节）。
+    # `source` 用 VARCHAR(24) 与模型声明一致：`_check_existing_type` 会把长度参数
+    # 一起比较，两边写歪了每次启动都会刷一条"类型不一致"的告警。
+    # 老行 UPDATE 成 'manual' 是**刻意不做**的：这一列上线之前填进去的锚点
+    # 必然是人工录入或公开数据预填，没有第三方反推、也没有 SP-API 同步，
+    # 留 NULL 交给读取侧兜底成 "manual"，比在迁移里改写历史数据安全
+    # （本文件的规矩只有 ADD COLUMN，见模块文档）。
+    ("my_products", "source", "VARCHAR(24)"),     # manual / sellersprite_proxy / sp_api
+    ("my_products", "assumed_fields", "JSON"),    # 哪些字段是假设值（字段名列表）
 ]
 
 #: 索引：(索引名, 表名, 依赖列, DDL)。
