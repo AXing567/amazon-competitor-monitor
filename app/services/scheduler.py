@@ -95,15 +95,16 @@ async def job_pool_maintenance() -> None:
     所以四同法则必须定期重跑，否则池子会慢慢失真。
     """
     from app.domain.tiering import judge_tier
+    from app.models import Snapshot
     from app.services import settings_store
     from app.services.collector import row_to_unified
 
-    # TODO(下一轮 · 数据模型): 补 `snapshots.keywords`(JSON) 与 `MyProduct.category_path`。
-    #   缺的是什么：快照里没有竞品流量词，MyProduct 没有类目路径。
-    #   为什么缺：关键词是卖家精灵的慢通道（5~15s/次、有配额），采集时取到过但没落库，
-    #     所以这里 row_to_unified 出来的快照 keywords 恒为空；my_category_path 更是硬编码 None。
-    #   补齐后：decidable_dims 常态为 3，下面的 insufficient 分支自然不再命中。
-    #   注意：那个分支不要删——它是「将来再加维度」的护栏，不是临时补丁。
+    # 数据现状（不是待办）：`snapshots.keywords` 与 `MyProduct.category_path` 都已落库。
+    #   采集侧 `collector._save_snapshot` 会把流量词与类目路径写进快照，
+    #   老库由 `app/migrations.py` 幂等补列，还原侧 `row_to_unified` 二者都会带回。
+    #   因此正常情况下 `decidable_dims` 为 3，下面那个 insufficient 分支不会命中。
+    #   保留它的理由：那是「将来再加维度、而新维度数据尚未采集」时的护栏，
+    #   不是这一轮的临时补丁——**不要**因为现在不命中就删掉它。
     changed = 0
     skipped: list[str] = []
     with get_session() as s:
@@ -119,7 +120,18 @@ async def job_pool_maintenance() -> None:
             my = s.get(MyProduct, comp.my_product_id)
             if my is None:
                 continue
-            last = comp.snapshots[-1] if comp.snapshots else None
+            # 显式取「最新一条」，不用 `comp.snapshots[-1]`：
+            #   1. 关系列表会把该竞品最多 180 条快照全部加载进内存，只为取最后一条；
+            #   2. 更要紧的是 `[-1]` 的语义依赖关系的排序。排序一漏（关系少写 order_by），
+            #      `[-1]` 就退化成「数据库返回顺序的最后一条」——补采历史或 CSV 回填后
+            #      那是**过期快照**，拿它重算会把整个池子的结论覆盖成旧值，且完全静默。
+            # 这里把「最新」写进 SQL 的 ORDER BY，语义不依赖任何调用方约定。
+            last = s.execute(
+                select(Snapshot)
+                .where(Snapshot.competitor_id == comp.id)
+                .order_by(Snapshot.captured_at.desc(), Snapshot.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
             if last is None:
                 continue
             snap = row_to_unified(last, comp.marketplace)

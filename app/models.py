@@ -163,7 +163,18 @@ class Competitor(Base):
     last_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     my_product: Mapped["MyProduct"] = relationship(back_populates="competitors")
-    snapshots: Mapped[list["Snapshot"]] = relationship(back_populates="competitor")
+    # `order_by` 不是美观问题，是语义问题：调用方用 `snapshots[-1]` 取「最新快照」
+    # （见 scheduler.job_pool_maintenance），而没有 order_by 时 `[-1]` 拿到的是
+    # **数据库返回顺序**的最后一条——它今天恰好等于时间顺序，只因为采集是顺序插入、
+    # 主键自增。补采历史、CSV 回填、修数据缺口这三种写入都会打破这个巧合，
+    # 之后周维护就会拿过期快照重算整池，且全程无报错。
+    #
+    # 次键 `Snapshot.id` 不能省：同一天重采会产生两条 `captured_at` 相同的快照，
+    # 只按时间排序时 `[-1]` 在两者间不确定——表现为「同一份数据跑两次结论不同」。
+    snapshots: Mapped[list["Snapshot"]] = relationship(
+        back_populates="competitor",
+        order_by="(Snapshot.captured_at, Snapshot.id)",
+    )
 
 
 # ============================================================

@@ -122,13 +122,14 @@ def judge_tier(
 
     # ---- 硬门槛：流量池或节点，二选一必须过 ----
     #
-    # TODO(下一轮 · 数据模型): 补 `snapshots.keywords`(JSON) 与 `MyProduct.category_path`。
-    #   缺的是什么：竞品流量词（keywords）与自家类目路径（category_path）。
-    #   为什么缺：卖家精灵的关键词是慢通道（单次 5~15s、有配额），采集时虽然取到过，
-    #     但没有落库；第二天 `collector.row_to_unified()` 还原快照时 keywords 就是空的，
-    #     而 job_pool_maintenance 传的 my_category_path 恒为 None。
-    #   补齐后：节点维度可判，decidable_dims 常态为 3，insufficient 自然不再出现。
-    #   注意：下面这段兜底不要因此删除——它是「将来再加维度」时的护栏，不是临时补丁。
+    # 关于「可判维度」的现状：竞品流量词（`snapshots.keywords`）与自家类目路径
+    #   （`MyProduct.category_path`）都已落库并接通——采集侧写、`app/migrations.py`
+    #   幂等补列、`collector.row_to_unified()` 还原。所以价格 / 流量池 / 节点三维
+    #   常态可判，`decidable_dims` 一般为 3。
+    # 下面这段兜底与 `insufficient` 判定**不是**给缺失数据打的临时补丁：
+    #   它是「将来再加维度、而新维度的数据尚未采集」时的护栏。
+    #   维度少到不足以判定时，宁可不出结论（`unknown`），也不许拿缺数据当不合格——
+    #   那样会把「不知道」写成「不合格」，且没有任何报错。**不要**因为当前不命中就删掉。
     res.decidable_dims = sum(
         1 for dim in (res.price_ratio, res.keyword_overlap, res.node_match) if dim is not None
     )
