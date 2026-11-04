@@ -26,7 +26,9 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import get_session
+from app.domain import tiering as tiering_mod
 from app.domain.thresholds import GROUP_TIERING, TieringThresholds
+from app.domain.tiering import DIM_ORDER
 from app.models import Competitor, CompetitorBinding, MyProduct, User
 from app.services import identity, settings_store
 
@@ -75,9 +77,14 @@ def build_basis_summary(
 
     不允许返回空串或「无」：一个没有理由的结论等于没有结论，
     而这句话是老板在池子里扫一眼时唯一的决策依据。
+
+    **暂定必须说出口**：`tier_reasons["provisional"]` 为真时，头部写成
+    「暂定 B 级：」，且缺的那一维写成「词重合未测」——不许写成
+    「加权词重合 0%」或「重合较低」，那两句话都会让人以为我们评估过。
     """
     th = thresholds or TieringThresholds()
     reasons = dict(tier_reasons or {})
+    provisional = bool(reasons.get("provisional"))
 
     parts: list[str] = []
 
@@ -91,7 +98,22 @@ def build_basis_summary(
 
     overlap = reasons.get("keyword_overlap")
     if overlap is None:
-        parts.append("缺少流量词数据，重合度未计算")
+        if provisional:
+            # 「没测」不是「测了偏低」。缺哪几维、这一档是凭什么暂定的，
+            # 都由判定当时记录的 `missing_dims` 决定，不在这里另猜一份。
+            missing = [
+                dim
+                for dim in DIM_ORDER
+                if dim in (reasons.get("missing_dims") or ["keyword_overlap"])
+            ]
+            kept = [dim for dim in DIM_ORDER if dim not in missing]
+            lack = "、".join(tiering_mod.missing_dim_labels(missing)) or "关键维度"
+            parts.append(
+                f"缺{lack}，词重合未测"
+                f"（这一档是按{'、'.join(tiering_mod.missing_dim_labels(kept)) or '其余维度'}暂定的）"
+            )
+        else:
+            parts.append("缺少流量词数据，重合度未计算")
     else:
         parts.append(
             f"加权词重合 {overlap:.0%}"
@@ -116,7 +138,10 @@ def build_basis_summary(
     head = f"判为 {tier} 级：" if tier else ""
     if tier == "unknown":
         # 不许写成「判为 C 级」或「判为 unknown 级」：C 是结论，unknown 是还没结论。
+        # 也不许写成「暂定」：暂定是「有字母级但依据不全」，unknown 是「连字母级都没有」。
         head = "待判定（证据不足）："
+    elif provisional:
+        head = f"暂定 {tier} 级："
     return head + "；".join(parts)
 
 

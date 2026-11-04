@@ -81,8 +81,54 @@ def effective_tier(raw: Any) -> str:
     return TIER_UNKNOWN
 
 
-def _tier_label(tier: str) -> str:
-    return TIER_LABELS.get(tier, tier)
+def _tier_label(tier: str, tier_reasons: Optional[dict] = None) -> str:
+    """面板显示的层级标签。
+
+    `tier_reasons` 是**可选**的（默认 `None`）：老调用点只传 `tier`，
+    行为与以前完全一致。传入判定依据时，暂定档会带上「（暂定：缺XX）」。
+
+    为什么要看 `tier_reasons`：词重合没测出来时，`judge_tier` 给出的仍是一个
+    字母级，只在 `tier_reasons` 里标了 `provisional`。标签若照旧写「B 级 · 弱相关」，
+    用户读到的是「重合度中等」——一句我们没有任何证据支持的话。
+    """
+    base = TIER_LABELS.get(tier, tier)
+    if tier == TIER_UNKNOWN:
+        # `unknown` 自有「待判定（证据不足）」这句话，不许再叠一层「暂定」：
+        # 「暂定」的前提是有字母级，`unknown` 连字母级都还没有。
+        return base
+
+    reasons = dict(tier_reasons or {})
+    if not reasons.get("provisional"):
+        return base
+
+    dims = [d for d in _DIM_ORDER if d in (reasons.get("missing_dims") or [])]
+    short = [_DIM_SHORT_LABELS.get(d, d) for d in dims] or ["关键维度"]
+    return f"{base}（暂定：缺{'、'.join(short)}）"
+
+
+#: 三个维度的固定顺序，与 `domain/tiering.py` 的 `DIM_ORDER` 一致。
+#: 本模块不 import 它，是因为 L4 只想依赖判据的**结果**，不想顺手把判据的实现
+#: 也拖进来（那会让「这里只做映射」这条边界失守）。顺序不一致会让面板的
+#: 「缺什么」在两次刷新间换顺序，看起来像数据在抖。
+_DIM_ORDER: tuple[str, ...] = ("price_ratio", "keyword_overlap", "node_match")
+
+#: 标签里用的维度短名（一行内要说清缺什么，所以只留最短的辨识词）。
+_DIM_SHORT_LABELS: dict[str, str] = {
+    "price_ratio": "价格带",
+    "keyword_overlap": "词重合",
+    "node_match": "类目节点",
+}
+
+#: `tier_missing` 那一栏用的维度说明。`unknown` 与「暂定」**共用这一套措辞**：
+#: 同一个缺失在两处被写成两种说法，用户会以为是两件不同的事。
+_MISSING_DIM_TEXT: dict[str, str] = {
+    "price_ratio": "缺对手净价",
+    "keyword_overlap": "缺流量词（快照里没有 keywords）",
+    # 措辞要同时覆盖两种原因：竞品快照里没有、或自家锚点没配。
+    # 之前这里写死了"自家产品未落 category_path"，于是锚点明明配好了、
+    # 只是竞品没采到，面板也会指着用户说"你没配"——指向错误的方向。
+    "node_match": "缺类目路径（竞品快照或自家锚点缺 category_path）",
+}
 
 
 def _missing_dims(item: dict) -> list[str]:
@@ -91,18 +137,28 @@ def _missing_dims(item: dict) -> list[str]:
     这是**映射**不是判断：判据在 `domain/tiering.py`（`decidable_dims < 2` → 证据不足），
     这里只把 `None` 的维度翻成中文，好让面板能说清楚"为什么它是待判定"。
     不翻译的后果是面板上只显示「待判定」三个字，用户第一反应是"系统坏了"。
+
+    优先读判定当时写进 `tier_reasons["missing_dims"]` 的那一份快照（暂定档要用它
+    才知道「当初缺的是哪一维」）；没有这个键的老数据，退回按行上的三个值推。
     """
-    out: list[str] = []
-    if item.get("price_ratio") is None:
-        out.append("缺对手净价")
-    if item.get("keyword_overlap") is None:
-        out.append("缺流量词（快照里没有 keywords）")
-    if item.get("node_match") is None:
-        # 措辞要同时覆盖两种原因：竞品快照里没有、或自家锚点没配。
-        # 之前这里写死了"自家产品未落 category_path"，于是锚点明明配好了、
-        # 只是竞品没采到，面板也会指着用户说"你没配"——指向错误的方向。
-        out.append("缺类目路径（竞品快照或自家锚点缺 category_path）")
-    return out
+    reasons = item.get("tier_reasons") or {}
+    persisted = reasons.get("missing_dims")
+    if isinstance(persisted, (list, tuple)) and persisted:
+        dims = [d for d in _DIM_ORDER if d in persisted]
+    else:
+        dims = [d for d in _DIM_ORDER if item.get(d) is None]
+    return [_MISSING_DIM_TEXT.get(d, d) for d in dims]
+
+
+def _is_provisional(eff: str, item: dict) -> bool:
+    """这一行是不是「暂定档」：有字母级，但定档所依赖的维度里缺了东西。
+
+    判据只有一处（`tier_reasons.provisional`），这里不加新条件——
+    在展示层再推一次「算不算暂定」等于留了第二份判据，早晚会和判定层不一致。
+    """
+    if eff == TIER_UNKNOWN:
+        return False
+    return bool((item.get("tier_reasons") or {}).get("provisional"))
 
 
 # ============================================================
@@ -198,10 +254,17 @@ def list_competitors(
         b = bindings.get(row.get("id"))
         item = dict(row)
         item["tier"] = eff
-        item["tier_label"] = _tier_label(eff)
+        reasons = row.get("tier_reasons") or {}
+        provisional = _is_provisional(eff, row)
+        item["tier_label"] = _tier_label(eff, reasons)
         item["tier_stored"] = row.get("tier")
-        # 只有待判定才需要解释缺什么；S/A/B/C 是正常结论，不需要"缺什么"
-        item["tier_missing"] = _missing_dims(row) if eff == TIER_UNKNOWN else []
+        # `tier_provisional`：给面板一个明确的布尔位，别让前端去解析标签里的括号。
+        item["tier_provisional"] = provisional
+        # 待判定要说清缺什么；**暂定档也要说**——否则面板只剩一个字母级，
+        # 用户会把它当成「测过了、轻度重合」。S/A/B/C 的正常结论才不需要这一栏。
+        item["tier_missing"] = (
+            _missing_dims(row) if (eff == TIER_UNKNOWN or provisional) else []
+        )
         item["battlefield"] = {
             "tier": eff,
             "my_asin": (mine or {}).get("asin"),
@@ -241,9 +304,14 @@ def get_competitor_detail(
 
     stored = res.get("tier")
     eff = effective_tier(stored)
+    reasons = res.get("tier_reasons") or {}
     res["tier"] = eff
-    res["tier_label"] = _tier_label(eff)
+    res["tier_label"] = _tier_label(eff, reasons)
     res["tier_stored"] = stored
+    res["tier_provisional"] = _is_provisional(eff, res)
+    res["tier_missing"] = (
+        _missing_dims(res) if (eff == TIER_UNKNOWN or res["tier_provisional"]) else []
+    )
 
     comp_id = _competitor_id_by_asin(ctx.tenant_id, asin)
     b = binding.resolve_binding(ctx.tenant_id, ctx.user_id, comp_id) if comp_id else None
@@ -443,7 +511,7 @@ def get_change_history(
             "ok": True,
             "asin": comp.asin,
             "tier": effective_tier(comp.tier),
-            "tier_label": _tier_label(effective_tier(comp.tier)),
+            "tier_label": _tier_label(effective_tier(comp.tier), comp.tier_reasons),
             "status": comp.status,
             "days": days,
             "snapshots": [

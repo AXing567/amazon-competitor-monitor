@@ -124,11 +124,33 @@ class TieringResult(BaseModel):
     decidable_dims: int = 0
     insufficient: bool = False
 
+    # ---- 暂定档（本轮新增；同样只加字段，不改上面任何字段的含义）----
+    # `insufficient` 说的是「维度少到不配下结论」，`provisional` 说的是
+    # 「结论下得出来，但定档所依赖的关键维度里有一维压根没测」——
+    # 有一个字母级，但只是暂定。两件事必须分开：
+    #   insufficient → effective_tier 是 "unknown"，连入池都不该定；
+    #   provisional  → effective_tier 仍是字母级，但面板必须写明「暂定 + 缺什么」。
+    # 为什么需要它：`keyword_overlap is None` 的含义是「词维度没测出来」，
+    # 原来的 `_decide_letter_tier` 直接返回 "B"（对外语义「轻度重合」），
+    # 于是「没测」被写成了「测了、不重合」——一句不报错、面板上看不出来的假话。
+    #: 结论是「暂定」的：通过的门槛不足以区分 S/A/B/C 之间的差别
+    provisional: bool = False
+    #: 哪些维度没测出来（英文键：price_ratio / keyword_overlap / node_match）
+    missing_dims: list[str] = Field(default_factory=list)
+    #: 一句人话，直接给面板用
+    provisional_reason: Optional[str] = None
+
     @property
     def effective_tier(self) -> str:
         """消费方应该读这个，而不是直接读 `tier`。
 
         证据不足时返回 `"unknown"`（待判定，缺数据），而不是把 `tier` 里的
         兜底 `C` 当成结论下发。`tier` 保留原含义只为兼容老调用点。
+
+        **注意**：`provisional` 不改变这里的返回值。暂定档仍然有字母级，
+        把它压成 `unknown` 会让「暂定 B」和「什么都没测」混成一件事，
+        而这两者对使用者的含义完全不同（前者可以先用起来、后者不能用）。
+        暂定的表达方式是在 `tier` 之外带上 `provisional` / `missing_dims`，
+        由面板文案（`queries._tier_label`）与 `basis_summary` 说出口。
         """
         return "unknown" if self.insufficient else self.tier

@@ -24,6 +24,18 @@ OVERLAP_A = 0.40               # A 级门槛
 OVERLAP_B = 0.20               # B 级门槛
 CORE_COVERAGE = 0.80           # 核心词池覆盖的流量比例（当前未被消费，仍要进 SPEC）
 
+#: 三个维度的固定顺序。`missing_dims` 与各项文案都按这个顺序输出，
+#: 免得同一份数据在两次运行里长出两种排列、让 diff 和面板看起来在抖。
+DIM_ORDER: tuple[str, ...] = ("price_ratio", "keyword_overlap", "node_match")
+
+#: 维度对外中文名。面板与人话理由共用一份，避免两处各写一套措辞
+#: （历史教训：同一个「缺类目路径」在面板上前后有两种说法，用户以为是两件事）。
+DIM_LABELS: dict[str, str] = {
+    "price_ratio": "价格带",
+    "keyword_overlap": "流量词",
+    "node_match": "类目节点",
+}
+
 
 # ============================================================
 # 原子算法
@@ -106,6 +118,18 @@ def judge_tier(
     res.node_match = _check_node_match(my_category_path, comp.category_path)
     node_ok = res.node_match is True or keyword_ok  # 跨界但词重合 → 也算通过
 
+    # ---- 哪些维度压根没测出来 ----
+    # 这是「结论的完备性」，不是「结论本身」。值为 None 的含义是**没测**，
+    # 不是「测了、不成立」；两者在下游必须区分，否则「不知道」会变成「不合格」。
+    # 无论最终判成什么（含 C 级拒收），都要记下来：缺数据是数据问题，
+    # 不会因为结论恰好是 C 就消失。
+    dim_values = {
+        "price_ratio": res.price_ratio,
+        "keyword_overlap": res.keyword_overlap,
+        "node_match": res.node_match,
+    }
+    res.missing_dims = [dim for dim in DIM_ORDER if dim_values[dim] is None]
+
     res.tier_reasons = {
         "price_ratio": res.price_ratio,
         "price_band_ok": price_ok,
@@ -118,6 +142,12 @@ def judge_tier(
             if functional_match is None
             else None
         ),
+        # 两个键先占位：下面命中「暂定」时会被改写。
+        # 一开始就写进 dict 的原因：这两个键要落库（`Competitor.tier_reasons`
+        # 是 JSON 列），面板读的是库里的那一份，不是内存里的对象。
+        # 只有部分行有这个键，会让面板的 `.get()` 长出一堆「有/没有」两种分支。
+        "provisional": False,
+        "missing_dims": list(res.missing_dims),
     }
 
     # ---- 硬门槛：流量池或节点，二选一必须过 ----
@@ -142,6 +172,9 @@ def judge_tier(
         res.passed = False
         res.tier = "C"
         res.reject_reason = _reject_reason(price_ok, keyword_ok, res, th)
+        # 这里**不**标暂定：没通过门槛就不存在「暂定某一档」，
+        # 那是「不入池」。但 `missing_dims` 照样保留——缺哪几维是数据问题，
+        # 不因为结论是 C 就不存在，面板要用它说明「这次拒收里有多少是缺数据」。
         return res
 
     res.passed = True
@@ -153,6 +186,18 @@ def judge_tier(
         my_daily_units=my_daily_units,
         th=th,
     )
+
+    # ---- 标注「暂定」----
+    # 词重合没测出来时，`_decide_letter_tier` 会给出 "B"（理由见那里）。
+    # 那个 B 必须带上「暂定」，否则它和「测过了、轻度重合」在数据上完全同形，
+    # 面板只能照着读成「重合度中等」——一句我们没有任何证据支持的话。
+    if res.keyword_overlap is None:
+        res.provisional = True
+        res.provisional_reason = provisional_reason(res.missing_dims)
+
+    # 允许前面出现过的「暂定」被证明是误标（例如未来补上词维度后不走那一支）
+    res.tier_reasons["provisional"] = res.provisional
+    res.tier_reasons["missing_dims"] = list(res.missing_dims)
     return res
 
 
@@ -176,6 +221,15 @@ def _decide_letter_tier(
         return "A"
 
     if overlap is None:
+        # 词维度**没测出来**（拿不到流量词），不是「测了、不重合」。
+        # 这里仍然给中间档 B，但调用方必须把 `provisional=True` 置上，
+        # 并给出「缺什么、这一档是凭什么暂定的」的理由（见 `judge_tier`）。
+        #
+        # 为什么是 B 而不是靠边的 S / C：
+        #   S = 最高优先级，误报会让用户把注意力全押上去；
+        #   C = 无关，误判会直接丢掉一个可能真是 S 的对手。
+        #   B 是中间档，两个方向上都最不容易造成不可逆的后果——
+        #   在最坏情况下，它只是「看着像要盯一下」，而不是「押上全部」或「丢掉」。
         return "B"
 
     # ---- S 级：高重合 + 价格带重叠 + 节点一致 + 体量咬合 ----
@@ -191,6 +245,30 @@ def _decide_letter_tier(
         return "B"
 
     return "C"
+
+
+def missing_dim_labels(missing: list[str] | None) -> list[str]:
+    """把英文维度键翻成中文（面板 / 人话理由共用同一套措辞）。
+
+    未收录的键原样返回：宁可露出一个英文键，也不许悄悄丢掉一维——
+    丢掉的那一维会让「缺什么」这句话变成错的。
+    """
+    return [DIM_LABELS.get(dim, dim) for dim in (missing or [])]
+
+
+def provisional_reason(missing: list[str] | None) -> str:
+    """一句话说明「为什么这一档只是暂定」，可直接上屏。
+
+    措辞必须把「没测」和「测了不重合」分开：写成「词重合较低」会让用户
+    以为我们评估过这个对手的流量池，实际连他的出单词都没拿到。
+    """
+    dims = [dim for dim in DIM_ORDER if dim in (missing or [])]
+    lack = "、".join(missing_dim_labels(dims)) or "关键维度"
+    kept = "、".join(missing_dim_labels([d for d in DIM_ORDER if d not in dims])) or "其余维度"
+    return (
+        f"缺{lack}（没测出来，不是测了不重合）："
+        f"这一档是按{kept}暂定的，不能据此判断重合深浅"
+    )
 
 
 def _is_new_black_horse(comp: UnifiedSnapshot) -> bool:
