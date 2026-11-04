@@ -335,6 +335,9 @@ def _save_snapshot(s: Session, competitor_id: int, snap: UnifiedSnapshot) -> Sna
         # 但库里保留区别，出问题时能看出是哪一种。
         category_path=snap.category_path or None,
         keywords=snap.keywords or None,
+        # 必须落库，理由见 `models.Snapshot.traffic_keywords_total`：
+        # 不存的话「采集时判」和「从库里重算」会用两套判据，结论可能不同且不报错。
+        traffic_keywords_total=snap.traffic_keywords_total,
         data_quality=snap.data_quality,
         source=snap.source,
     )
@@ -508,6 +511,9 @@ def row_to_unified(row: Snapshot, marketplace: str = "US") -> UnifiedSnapshot:
         release_date=row.release_date,
         category_path=list(row.category_path or []),
         keywords=list(row.keywords or []),
+        # 抽样守卫的第二道判据（抽样不到总量 1/3）。不还原它，
+        # 这条路径上的守卫就只剩「条数 < 50」，两条路的结论会分叉。
+        traffic_keywords_total=row.traffic_keywords_total,
         data_quality=row.data_quality,
         source=row.source,
         captured_at=row.captured_at,

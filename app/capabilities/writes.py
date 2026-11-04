@@ -563,6 +563,16 @@ CAPABILITIES: tuple[Capability, ...] = (
                 help='从根到叶的列表，例如 ["Toys & Games", "Toy Vehicles", "Play Trucks"]。'
                      "分层判断的「节点」维度只认它",
             ),
+            # Listing 三项：五大维度里的「Listing 基线」靠它们。
+            # 之前只声明到 category_path 为止，于是这一整维在能力层是**只读**的
+            # ——面板能看见标题、改不了标题，而 `assess()` 照样把这一维算进就绪度。
+            # 「能看不能改」比不显示更糟：人会以为改不了是因为不值得改。
+            _p("title", "标题", T_STR, help="对手抄你 listing 时，这是比对基准"),
+            _p("image_url", "主图链接", T_STR),
+            _p(
+                "bullet_points", "五点描述", T_JSON,
+                help="字符串列表，例如 [\"第一条\", \"第二条\"]",
+            ),
             # 下面两个是「这个锚点能不能拿去决策」的开关。
             # 不声明它们的话，`_coerce_params` 会把传进来的值静默丢掉
             # （只认 params 里声明过的键），于是库里的 source 永远是默认值，

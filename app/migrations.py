@@ -87,6 +87,12 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("snapshots", "release_date", "VARCHAR(10)"), # 上架日期 YYYY-MM-DD（黑马判据只用它）
     ("my_products", "category_path", "JSON"),     # 自家类目路径（节点维度只认它）
 
+    # snapshots：竞品词库**总词数**（上游 `traffic_keywords_total`）。
+    # 不存这一列的后果是「采集时判」与「重算时判」用两套判据：
+    # `is_thin_keyword_sample()` 的第二道判据（抽样不到总量 1/3）在重算路径上
+    # 恒为 None → 退化成只看「条数 < 50」。同一批数据两条路给出不同档位，且不报错。
+    ("snapshots", "traffic_keywords_total", "INTEGER"),
+
     # my_products：锚点溯源（见 models.MyProduct 第 6 节）。
     # `source` 用 VARCHAR(24) 与模型声明一致：`_check_existing_type` 会把长度参数
     # 一起比较，两边写歪了每次启动都会刷一条"类型不一致"的告警。

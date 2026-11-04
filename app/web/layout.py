@@ -143,6 +143,13 @@ td.dim,.dim{color:var(--muted)}
 .field .h b{color:var(--text);font-weight:600}
 .field input,.field select{font:inherit;font-size:13px;width:100%;padding:6px 9px;border-radius:8px;
   border:1px solid var(--line);background:var(--card);color:var(--text)}
+/* 文本类字段（词表、类目路径、标题、五点）用宽列：150px 的右列会把
+   textarea 压成一条缝，一行只放得下三四个字，改起来像在猜。 */
+.field.wide{grid-template-columns:1fr 340px}
+.field textarea{font:inherit;font-size:12.5px;width:100%;padding:7px 9px;border-radius:8px;
+  border:1px solid var(--line);background:var(--card);color:var(--text);
+  line-height:1.6;resize:vertical}
+@media(max-width:760px){.field.wide{grid-template-columns:1fr}}
 .field input.changed{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
 .src{font-size:11px;color:var(--muted);margin-top:3px}
 .layerbar{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 14px}
@@ -175,6 +182,41 @@ details.exp[open]>summary{margin-bottom:8px}
 .note{font-size:12px;color:var(--muted);line-height:1.8;margin:6px 0}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12.5px}
 .kv .k{color:var(--muted)}
+
+/* ── 数据模式切换（自家基线页） ── */
+.modebox{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:760px){.modebox{grid-template-columns:1fr}}
+.mode{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:13px 15px;cursor:pointer}
+.mode:hover{border-color:var(--accent)}
+.mode.on{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.10)}
+.mode .t{display:flex;align-items:center;gap:8px;font-weight:650;font-size:13.5px}
+.mode .d{font-size:12px;color:var(--muted);line-height:1.7;margin-top:5px}
+.mode .act{margin-top:9px;display:flex;gap:6px;flex-wrap:wrap}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--line);flex:none}
+.dot.ok{background:var(--ok)} .dot.bad{background:var(--p0)}
+
+/* ── 锚点五维卡 ── */
+.dimcard{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  margin-bottom:12px;overflow:hidden}
+.dimcard .hd{display:flex;align-items:center;gap:10px;padding:12px 16px 9px}
+.dimcard .hd .n{font-weight:650;font-size:13.5px}
+.dimcard .hd .c{margin-left:auto;font-size:12px;color:var(--muted);
+  font-variant-numeric:tabular-nums}
+.dimcard .why{font-size:11.5px;color:var(--muted);padding:0 16px 9px;line-height:1.7}
+.bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin:0 16px 11px}
+.bar i{display:block;height:100%;background:var(--ok)}
+.bar.part i{background:var(--p1)}
+.bar.none i{background:var(--p0)}
+.frow{display:grid;grid-template-columns:150px 1fr 76px;gap:10px;align-items:baseline;
+  padding:8px 16px;border-top:1px dashed var(--line);font-size:12.5px}
+.frow .l{color:var(--muted)}
+.frow .v{min-width:0;overflow-wrap:anywhere}
+.caps{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.cap{font-size:11.5px;padding:3px 9px;border-radius:6px;border:1px solid var(--line);
+  color:var(--muted)}
+.cap.yes{border-color:var(--ok);color:var(--ok)}
+.assume-l{color:var(--p1);font-weight:600}
 """
 
 
@@ -232,10 +274,34 @@ class ApiError extends Error {
 }
 
 let CURRENT_USER = localStorage.getItem('cm_user') || '';
+
+// ── 数据模式（live / mock）─────────────────────────────────────
+// 放在 localStorage 而不是内存变量：刷新页面后应该还停在原来那个模式。
+// 一个人切到 Mock 看了一眼、再刷新变成真实数据，他会以为 Mock 数据丢了。
+//
+// 每个请求都带 `X-Data-Mode` —— 包括面板自己的 `/api/dataset`。
+// 服务端把模式钉在请求上下文里（见 `app/api/middleware.py`），
+// 所以这里漏带一个请求，那一个请求就会读到真实库，
+// 而页面上其余部分还是 Mock —— 两套数字同屏，最难查的那种不一致。
+let DATA_MODE = localStorage.getItem('cm_mode') || 'live';
+
 function headers(extra){
-  const h = Object.assign({'Content-Type': 'application/json'}, extra || {});
+  const h = Object.assign(
+    {'Content-Type': 'application/json', 'X-Data-Mode': DATA_MODE},
+    extra || {}
+  );
   if (CURRENT_USER) h['X-User-Id'] = CURRENT_USER;
   return h;
+}
+
+// 切模式 = 换一个库看。已经加载过的视图必须全部作废重拉，
+// 否则切过去看到的是上一个库的 DOM。
+function setDataMode(mode){
+  if (mode === DATA_MODE) return;
+  DATA_MODE = mode;
+  localStorage.setItem('cm_mode', mode);
+  toast(mode === 'mock' ? '已切到 Mock 数据' : '已切到真实数据');
+  reloadAll();
 }
 
 async function api(path, body, method){
@@ -328,6 +394,10 @@ function act(fn, label){
 const LOADERS = {};
 const loaded = {};
 
+//: 打开面板先落在哪一屏。选「自家基线」：它是所有判断的上游，
+//: 锚点没配好时，看板和池子上的每个数字都只是破折号，而这一页会说清为什么。
+const DEFAULT_VIEW = 'baseline';
+
 function register(name, fn){ LOADERS[name] = fn; }
 
 async function safeLoad(name){
@@ -349,7 +419,7 @@ async function safeLoad(name){
 }
 
 async function show(name){
-  const n = LOADERS[name] ? name : 'board';
+  const n = LOADERS[name] ? name : DEFAULT_VIEW;
   $$('.view').forEach(v => v.classList.toggle('on', v.id === 'view-' + n));
   $$('.tabs a').forEach(a => a.classList.toggle('on', a.dataset.view === n));
   if (!loaded[n]) { loaded[n] = true; await safeLoad(n); }
@@ -357,8 +427,8 @@ async function show(name){
 
 function reloadAll(){
   Object.keys(loaded).forEach(k => { loaded[k] = false; });
-  const cur = (location.hash || '#board').slice(1);
-  const n = LOADERS[cur] ? cur : 'board';
+  const cur = (location.hash || '#' + DEFAULT_VIEW).slice(1);
+  const n = LOADERS[cur] ? cur : DEFAULT_VIEW;
   loaded[n] = true;
   safeLoad(n);
 }
@@ -388,10 +458,10 @@ async function initUsers(){
   };
 }
 
-window.addEventListener('hashchange', () => show((location.hash || '#board').slice(1)));
+window.addEventListener('hashchange', () => show((location.hash || '#' + DEFAULT_VIEW).slice(1)));
 document.addEventListener('DOMContentLoaded', async () => {
   initUsers();
-  show((location.hash || '#board').slice(1));
+  show((location.hash || '#' + DEFAULT_VIEW).slice(1));
 });
 """
 

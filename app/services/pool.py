@@ -121,6 +121,7 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
         "review_count",
         "title",
         "image_url",
+        "bullet_points",
         "core_keywords",
         "category_path",
         # 溯源两列（见 models.MyProduct 第 6 节）

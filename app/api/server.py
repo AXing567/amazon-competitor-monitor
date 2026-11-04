@@ -33,8 +33,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.agent import llm
-from app.api.dashboard import DASHBOARD_HTML
 from app.api.deps import resolve_ctx
+from app.api.middleware import DataModeMiddleware
 from app.api.routes import api_router
 from app.capabilities.types import SOURCE_SYSTEM
 from app.channels.feishu import (
@@ -89,6 +89,11 @@ app = FastAPI(
     description="亚马逊竞品监控 · 采集/分层/预警/Agent 对话",
     lifespan=lifespan,
 )
+
+# 数据模式：从 `X-Data-Mode` 读 live / mock，钉进本次请求的上下文。
+# 用纯 ASGI 中间件而不是 `@app.middleware("http")`，理由见 `app/api/middleware.py`
+# ——那条链路上 ContextVar 的传播不能有"通常没问题"。
+app.add_middleware(DataModeMiddleware)
 
 # T04：L4 能力层的 REST 出口。挂在这里而不是散落在本文件，
 # 是为了让「有哪些端点」这件事只有一个地方能回答。
@@ -239,46 +244,15 @@ def panel() -> str:
     return render_panel()
 
 
-@app.get("/legacy", response_class=HTMLResponse)
-def legacy() -> str:
-    """旧只读看板。保留到新面板五视图全部验收通过为止。"""
-    return DASHBOARD_HTML
+# `/legacy` 与 `_panel_placeholder()` 已删除（2026-11-04）。
+# 旧看板当初的定位是「保留到新面板全部验收通过为止」——六视图现已全部接通
+# （含自家基线），那个条件已经满足。留着它的代价不是 219 行代码，
+# 而是每个新来的人都要先判断一次「这两个页面哪个是真的」。
+# 删掉的东西在 git 历史里都还在：`git log -- app/api/dashboard.py`。
 
 
-def _panel_placeholder() -> str:
-    """T04 时期的占位页，现已不再被路由使用。
+# placeholder 已删除，见上文说明。
 
-    留着的原因：`/health` 的排障说明与 README 的早期截图引用过它，
-    删掉会让"这条链接为什么 404"变成一次考古。下一轮清技术债时一起删。
-    """
-    return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>竞品监控 · 面板</title>
-  <style>
-    body {{ font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-            margin: 0; padding: 48px 24px; background: #0f1115; color: #e6e8ee; }}
-    .card {{ max-width: 720px; margin: 0 auto; background: #171a21; border-radius: 12px;
-             padding: 28px 32px; border: 1px solid #262b36; }}
-    h1 {{ font-size: 20px; margin: 0 0 8px; }}
-    p {{ color: #9aa3b2; line-height: 1.7; margin: 8px 0; }}
-    code {{ background: #0f1115; padding: 2px 6px; border-radius: 4px; color: #8fd0ff; }}
-    a {{ color: #6cb6ff; }}
-    ul {{ color: #9aa3b2; line-height: 1.9; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>面板占位页</h1>
-    <p>五视图面板（看板 / 阈值 / 竞品池 / 动作记录 / 数据健康）已经上线，见
-       <a href="/panel">/panel</a>。</p>
-    <p>旧只读看板：<a href="/legacy">/legacy</a> · 接口文档：<a href="/docs">/docs</a></p>
-    <p>当前租户：<code>{settings.tenant_id}</code></p>
-  </div>
-</body>
-</html>"""
 
 
 # ============================================================

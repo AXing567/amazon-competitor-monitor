@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import desc, select
+from sqlalchemy.orm import Session
 
 from app.capabilities.types import (
     CapContext,
@@ -184,17 +185,28 @@ def _is_provisional(eff: str, item: dict) -> bool:
 # ============================================================
 
 
-def _my_product_row(tenant_id: str):
-    """按 tenant 取自家产品 ORM 对象（调用方必须自己持有 session）。
+def _my_product_row(tenant_id: str, session: Session | None = None):
+    """按 tenant 取自家产品 ORM 对象。
+
+    `session` 传**调用方自己那个会话**。为什么不总是自己开一个 with 块：
+    那样返回的是 detached 对象，而 `baseline.assess()` / `baseline.describe()`
+    要逐个属性访问。现在能跑只是因为 `expire_on_commit=False` 让属性在会话关闭后
+    还没被过期；换一个配置就是 `DetachedInstanceError`，而它只在「库里有数据、
+    又刚好提交过」时复现——空库跑的测试永远碰不到这一条。
 
     为什么不用 `pool.get_my_product()`：它返回 dict，够看汇总，但锚点体检要逐维度
     看 `missing` 列表，而 `baseline.assess()` 需要属性访问。这是 L4 → L0 的只读穿透，
     属已知分层债：等 `pool` 拆分后下沉成 `pool.assess_my_product()`（记在交付报告的遗留里）。
     """
-    with get_session() as s:
+    def _query(s: Session):
         return s.execute(
             select(MyProduct).where(MyProduct.tenant_id == tenant_id).limit(1)
         ).scalar_one_or_none()
+
+    if session is not None:
+        return _query(session)
+    with get_session() as s:
+        return _query(s)
 
 
 def _render_anchor_text(a) -> str:
@@ -383,7 +395,7 @@ def get_daily_brief(
 
 def get_my_status(ctx: CapContext) -> dict:
     with get_session() as s:
-        my = _my_product_row(ctx.tenant_id)
+        my = _my_product_row(ctx.tenant_id, s)
         if my is None:
             return {
                 "ok": True,
@@ -445,7 +457,7 @@ def get_my_status(ctx: CapContext) -> dict:
 
 def check_anchor(ctx: CapContext) -> dict:
     with get_session() as s:
-        my = _my_product_row(ctx.tenant_id)
+        my = _my_product_row(ctx.tenant_id, s)
         if my is None:
             return {
                 "ok": True,
@@ -459,6 +471,41 @@ def check_anchor(ctx: CapContext) -> dict:
     data["exists"] = True
     data["text"] = _render_anchor_text(a)
     return {"ok": True, **data}
+
+
+# ============================================================
+# ⑤b get_baseline —— 字段级锚点明细
+#
+# 和 check_anchor 的分工：check_anchor 回答「五维各差几个、缺了哪条判断失灵」，
+# 本能力回答「那一格里现在到底填的是什么数、这个数从哪来」。
+# 只做体检的话，人知道自己缺 2 项，却不知道自己要改的是售价还是保本价；
+# 只给值的话，人看着一屏数字也判断不出够不够跑。
+# ============================================================
+
+
+def get_baseline(ctx: CapContext) -> dict:
+    """自家锚点的完整明细：每个字段的值 / 类型 / 是否假设值，外加体检与能力边界。"""
+    with get_session() as s:
+        my = _my_product_row(ctx.tenant_id, s)
+        if my is None:
+            return {
+                "ok": True,
+                "exists": False,
+                "message": "尚未设置自家锚点，系统现在无法判断任何一个竞品。",
+                "hint": "先填三个数：当前售价、保本价、日均销量。",
+                "baseline": None,
+                "assessment": None,
+            }
+        # 两个都要在会话里算完：对象出 with 之后不能保证还能访问属性
+        detail = baseline_mod.describe(my)
+        assessment = baseline_mod.assess(my).to_dict()
+
+    return {
+        "ok": True,
+        "exists": True,
+        "baseline": detail,
+        "assessment": assessment,
+    }
 
 
 # ============================================================
@@ -833,6 +880,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         description="五大维度缺了什么、缺了导致哪个判断失灵、现在能做哪些判断。",
         params=(),
         handler=check_anchor,
+    ),
+    Capability(
+        name="get_baseline",
+        scope=SCOPE_SHARED,
+        group=GROUP_QUERY,
+        title="自家基线明细",
+        description="每个锚点字段的实际值、值类型、来源、是否假设值；含五维体检与能力边界。",
+        params=(),
+        handler=get_baseline,
     ),
     Capability(
         name="get_change_history",

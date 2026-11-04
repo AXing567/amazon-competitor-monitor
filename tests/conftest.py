@@ -70,6 +70,16 @@ def _isolated_db_per_module(request, tmp_path_factory):
         pass
 
     settings.database_url = f"sqlite:///{db_path.as_posix()}"
+    # Mock 库也必须指到临时目录。不改的话，任何一次碰到 mock 模式的用例
+    # 都会写进项目里那个真的 `data/mock.db`——症状是"跑完测试，面板上的 Mock 数据
+    # 变了样"，而且没有一条断言会失败。
+    settings.mock_database_url = f"sqlite:///{(db_path.parent / 'test_mock.db').as_posix()}"
+    try:
+        mock_path = db_path.parent / "test_mock.db"
+        if mock_path.exists():
+            mock_path.unlink()
+    except OSError:      # pragma: no cover
+        pass
     app_db.reset_engine()
     app_db.init_db()
 

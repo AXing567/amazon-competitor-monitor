@@ -355,9 +355,10 @@ class Channel(ABC):
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` `/panel` | 面板（五视图，单文件 HTML） |
-| GET | `/legacy` | 旧只读看板（保留到新面板全量验收） |
+| GET | `/` `/panel` | 面板（六视图，单文件 HTML） |
 | GET | `/health` | 服务 / 调度 / 渠道 / 数据源 / LLM 全量自检 |
+| GET | `/api/dataset` | 当前数据模式（live/mock）与两个库的概况 |
+| POST | `/api/dataset/mock/rebuild` | 重建 Mock 数据集 |
 | GET | `/api/panel/context` | 当前租户、操作人、自家产品（产品层阈值要用 `my_product_id`） |
 | GET | `/api/panel/board` | 看板：四个数字卡 + 竞品表（含每个竞品的最近一次变化） |
 | GET | `/api/panel/competitors/{asin}/changes` | 单个竞品的三条时间线（快照/信号/动作） |

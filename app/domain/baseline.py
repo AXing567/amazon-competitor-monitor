@@ -46,6 +46,14 @@ SOURCE_SP_API = "sp_api"
 
 ANCHOR_SOURCES: tuple[str, ...] = (SOURCE_MANUAL, SOURCE_SELLERSPRITE, SOURCE_SP_API)
 
+#: 来源的中文名。面板「自家基线」页要显示「这个数是查来的还是你填的」，
+#: 显示成 `sellersprite_proxy` 等于没显示。
+SOURCE_LABELS: dict[str, str] = {
+    SOURCE_MANUAL: "手工录入",
+    SOURCE_SELLERSPRITE: "卖家精灵反推",
+    SOURCE_SP_API: "SP-API 同步",
+}
+
 #: `assumed_fields` 形状不对时给人照做的一句建议。
 ASSUMED_FIELDS_HINT = (
     '传字段名列表，例如 ["break_even_price", "fba_available_units", "lead_time_days"]。'
@@ -319,6 +327,117 @@ class BaselineAssessment:
             ],
             "warnings": self.warnings,
         }
+
+
+# ============================================================
+# 字段级明细（给面板「自家基线」页用）
+#
+# 体检回答「五维各差几个」，本段回答「那一格现在到底填了什么」。
+# 两者缺一不可：只给就绪度，人不知道自己该改哪个数；只给值，
+# 人不知道这些值凑起来够不够跑一次判断。
+# ============================================================
+
+#: 字段的**值类型**，不是显示格式。
+#:
+#: 为什么类型由 L2 说、格式由 L5 定：`current_price` 是金额、`target_margin_rate`
+#: 是 0~1 的比例、`sub_category_rank` 是名次——这三件事是领域事实，放哪层都一样；
+#: 而「金额显示成 $22.99 还是 22.99 美元」是排版决定。
+#: 让 API 只给 kind、面板自己格式化，能避免「后端拼了 `$` 前缀、前端又 money() 一次
+#: 变成 $$22.99」这种只有截图才看得出来的错。
+FIELD_KINDS: dict[str, str] = {
+    "fba_available_units": "int",
+    "daily_sales_avg": "float1",
+    "lead_time_days": "int",
+    "current_price": "money",
+    "break_even_price": "money",
+    "target_margin_rate": "percent",
+    "sub_category_rank": "rank",
+    "rating": "rating",
+    "review_count": "int",
+    "core_keywords": "keywords",
+    "title": "text",
+    "image_url": "image",
+    "bullet_points": "list",
+    "category_path": "path",
+}
+
+
+def _json_safe(value):
+    """把 ORM 里读出来的值转成能进 JSON 的形状。
+
+    只处理两种真实存在的意外：JSON 列被手工改库写成了字符串、
+    以及未来可能出现的日期类型。其余原样返回——**不做任何格式化**。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    return str(value)
+
+
+def _field_row(my_product, name: str, label: str, assumed: set[str]) -> dict:
+    raw = getattr(my_product, name, None)
+    return {
+        "name": name,
+        "label": label,
+        "kind": FIELD_KINDS.get(name, "text"),
+        "value": _json_safe(raw),
+        "filled": _has_value(raw),
+        "assumed": name in assumed,
+    }
+
+
+def describe(my_product) -> dict:
+    """把锚点摊平成「每个字段一行」：值、类型、是否已填、是不是假设值。
+
+    ## 整行 `source` 与字段级 `assumed_fields` 谁说话
+
+    表里只有一个 `source` 列，它是**这一批数据的主要来源**，不是每个字段各自的出身。
+    字段级的真话由 `assumed_fields` 承担，而且它优先级更高：
+
+        source = "sellersprite_proxy"     ← 主要来自卖家精灵
+        assumed_fields = ["break_even_price", ...]  ← 但保本价不是
+
+    卖家精灵给不出保本价、FBA 库存、补货周期——那些只能是拍的。
+    所以一个字段先看它在不在 `assumed_fields` 里，再退回看 `source`。
+    反过来（先信 source）会让保本价显示成「卖家精灵反推」，那是**假溯源**，
+    比不标来源更糟。
+    """
+    assumed = set(read_assumed_fields(getattr(my_product, "assumed_fields", None)))
+    source = getattr(my_product, "source", None)
+
+    groups: list[dict] = []
+    for dim in DIMENSIONS:
+        rows = [_field_row(my_product, name, label, assumed) for name, label in dim.fields]
+        groups.append(
+            {
+                "key": dim.key,
+                "name": dim.name,
+                "why": dim.why,
+                "informs": dim.informs,
+                "auto_fillable": dim.auto_fillable,
+                "filled": sum(1 for r in rows if r["filled"]),
+                "total": len(rows),
+                "fields": rows,
+            }
+        )
+
+    # `category_path` 不属于五大维度（它不计入就绪度，见 DIMENSIONS 的注释），
+    # 但它是分层节点维度的**唯一**输入，属于「不填就有一整个维度判不了」的那种字段。
+    # 放在 extras 而不是硬塞进某个维度：塞进去会改变就绪度分母，
+    # 让历史报告里的 73.3 变成一个和当时不同的分数。
+    extras = [_field_row(my_product, "category_path", "自家类目路径", assumed)]
+
+    return {
+        "asin": getattr(my_product, "asin", "") or "",
+        "source": source,
+        "source_label": SOURCE_LABELS.get(source) or ("未标注" if not source else source),
+        "assumed_fields": sorted(assumed),
+        "groups": groups,
+        "extras": extras,
+    }
 
 
 # ============================================================

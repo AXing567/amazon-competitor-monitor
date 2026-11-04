@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from app.web.views import actions, board, config, health, pool
+from app.web.views import actions, baseline, board, config, health, pool
 
 
 class View(NamedTuple):
@@ -34,7 +34,12 @@ class View(NamedTuple):
 
 
 #: 顺序 = 顶部标签顺序 = 页面 section 顺序。
+#:
+#: `baseline` 排第一不是随手放的：它是所有判断的**上游**。
+#: 锚点缺一个数，后面就有一整类判断变成「判不了」，而那个事实在别的视图里
+#: 只表现为"某个数字是破折号"——看不出根因。
 VIEWS: tuple[View, ...] = (
+    View("baseline", "自家基线", baseline),
     View("board", "数据看板", board),
     View("config", "阈值配置", config),
     View("pool", "竞品池", pool),

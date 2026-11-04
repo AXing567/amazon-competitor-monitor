@@ -21,12 +21,14 @@ from fastapi import APIRouter
 
 from app.api.routes.capabilities import router as capabilities_router
 from app.api.routes.config import router as config_router
+from app.api.routes.dataset import router as dataset_router
 from app.api.routes.identity import router as identity_router
 from app.api.routes.panel import router as panel_router
 
 api_router = APIRouter()
 api_router.include_router(capabilities_router)
 api_router.include_router(config_router)
+api_router.include_router(dataset_router)
 api_router.include_router(identity_router)
 api_router.include_router(panel_router)
 

@@ -161,18 +161,31 @@ def _panel_html() -> str:
 # ============================================================
 
 
-def test_panel_page_is_single_file_with_five_views():
-    """面板必须能在断网时打开：一个文件、一段内联脚本、零个外链资源。"""
+def test_panel_page_is_single_file_with_all_views():
+    """面板必须能在断网时打开：一个文件、一段内联脚本、零个外链资源。
+
+    ## 视图清单为什么从 `VIEWS` 派生，而不是写死一份
+
+    写死的清单一旦加视图就会红，而红的那条信息是"我加了一个视图"——
+    这件事在 diff 里本来就看得见，测试不该重复喊。真正需要守的是
+    **顺序一致性**（标签顺序 == section 顺序 == VIEWS 顺序），
+    那个只能用派生验证。
+
+    视图数量单独断言一个数字（下面那条），加视图时确实要改它——
+    这就是 review 点，但也只改一个数字，不用同步维护一份名单。
+    """
+    from app.web.views import VIEWS
+
     html = _panel_html()
 
     assert len(re.findall(r"<script", html)) == 1, "面板只许有 1 段内联 <script>"
     assert not re.findall(r"<(?:script|link|img)[^>]+(?:src|href)=", html), (
         "面板不许引用任何外部资源（断了网就打不开）"
     )
+    assert len(VIEWS) == 6, f"视图数量应当是 6，实际 {len(VIEWS)}：{[v.key for v in VIEWS]}"
     sections = re.findall(r'<section class="view" id="(view-[a-z]+)"', html)
-    assert sections == ["view-board", "view-config", "view-pool",
-                        "view-actions", "view-health"], sections
-    assert html.count('class="view-body"') == 5, "每个 view 必须恰好一个 .view-body"
+    assert sections == [f"view-{v.key}" for v in VIEWS], sections
+    assert html.count('class="view-body"') == len(VIEWS), "每个 view 必须恰好一个 .view-body"
 
     # 标签顺序 = section 顺序（都从 views.VIEWS 生成，这里验产物没走样）
     tabs = re.findall(r'data-view="([a-z]+)"', html)
@@ -192,10 +205,14 @@ def test_safeload_is_the_only_loader_entry():
     fetch_total = sum(s.count("fetch(") for s in sources.values())
     assert fetch_total == 1, f"`fetch(` 只许出现在 api() 里，实际 {fetch_total} 处"
 
-    register_total = sum(s.count("register('") for s in sources.values())
-    assert register_total == 5, f"应当恰好 5 个视图注册加载函数，实际 {register_total}"
+    from app.web.views import VIEWS
 
-    for mod in ("board", "config", "pool", "actions", "health"):
+    register_total = sum(s.count("register('") for s in sources.values())
+    assert register_total == len(VIEWS), (
+        f"应当每个视图各注册一个加载函数（{len(VIEWS)} 个），实际 {register_total}"
+    )
+
+    for mod in [v.key for v in VIEWS]:
         assert f"id=\"view-{mod}\"" in sources[f"{mod}.py"], mod
         assert sources[f"{mod}.py"].count('class="view-body"') == 1, mod
 
@@ -594,7 +611,7 @@ def test_board_battlefield_column_agrees_with_pool():
 # ============================================================
 
 
-def test_empty_db_renders_five_views_without_500():
+def test_empty_db_renders_all_views_without_500():
     """另起一个空库，把五视图的端点全打一遍。
 
     做法：把 `app.db` 的引擎/SessionLocal 换到空库，跑完还原。
@@ -642,7 +659,9 @@ def test_empty_db_renders_five_views_without_500():
 
         # 面板页面本身与库无关：空库下仍是同一个 61KB 单文件
         html = _panel_html()
-        assert html.count('class="view-body"') == 5
+        from app.web.views import VIEWS
+
+        assert html.count('class="view-body"') == len(VIEWS)
     finally:
         settings.database_url = old_url
         app_db.reset_engine()

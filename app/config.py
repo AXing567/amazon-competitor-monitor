@@ -21,7 +21,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # ---- 数据库 ----
+    # 两个库物理隔离，面板可在运行时切换看哪一个（见 `app.db.get_data_mode`）。
+    # 为什么不是「同一个库里换个 tenant_id」：Mock 数据集要能一键重建、整体丢弃，
+    # 它还需要自带一套用户/阈值/绑定才自洽——塞进真实库会让「这张表里的行算不算数」
+    # 变成每个查询都要记得判断的事，而忘记判断不会报错，只会让 Mock 竞品混进真实池子。
     database_url: str = f"sqlite:///{BASE_DIR / 'data' / 'competitor_monitor.db'}"
+    mock_database_url: str = f"sqlite:///{BASE_DIR / 'data' / 'mock.db'}"
 
     # ---- 卖家精灵转接桥 ----
     sellersprite_bridge_url: str = "http://127.0.0.1:8000"

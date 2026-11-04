@@ -263,6 +263,15 @@ class Snapshot(Base):
     # 将来会调，存结果就没法回溯重算了。
     keywords: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # 竞品词库**总词数**（上游 `traffic_keywords_total`），不是我们拿到几条。
+    #
+    # 为什么要单独存：`tiering.is_thin_keyword_sample()` 拿它判断「这次抽样够不够
+    # 下否定结论」。不存的话，从库里重算（周维护、面板改阈值后重算）时这个数
+    # 恒为 None，抽样守卫退化成只剩「条数 < 50」这一道——
+    # 于是**同一批数据，采集时判出 A、重算后判出 B**，而且不报错。
+    # 门槛越严这件事越明显（上游一页 20 条 vs 真实词库 2000 条）。
+    traffic_keywords_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # 元信息
     data_quality: Mapped[str] = mapped_column(String(16), default="partial")
     source: Mapped[str] = mapped_column(String(32), default="sellersprite")
