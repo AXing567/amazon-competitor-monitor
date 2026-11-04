@@ -85,8 +85,13 @@ def add_competitor(ctx: CapContext, asin: str, force: bool = False) -> dict:
 
     `force=True` 时未通过四同法则也入池，但分层结果会是 `unknown`（证据不足）
     或最低观察级——不是硬塞成 C 级（见止血补丁：拿不到证据 ≠ 证据表明不成立）。
+
+    `ctx.user_id` 必须原样递到 L3：绑定表要记的是「**谁**在盯这个竞品」，
+    告警按人分发完全依赖这一列。以前这里没传，`binding.upsert()` 就用默认用户兜底，
+    于是所有竞品都被记成默认负责人加的——那不是「没接线」，是记了一个假的人。
+    `ctx.user_id` 为 `None`（不认识的平台身份）是允许的，由下游兜底，本层不报错。
     """
-    return pool.add_competitor(ctx.tenant_id, asin, force=force)
+    return pool.add_competitor(ctx.tenant_id, asin, force=force, user_id=ctx.user_id)
 
 
 # ============================================================

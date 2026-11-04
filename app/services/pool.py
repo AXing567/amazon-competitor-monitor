@@ -169,8 +169,14 @@ def add_competitor(
     *,
     functional_match: Optional[bool] = None,
     force: bool = False,
+    user_id: Optional[int] = None,
 ) -> dict:
-    """加一个竞品进池。会先拉数据跑四同法则，再决定进不进、进哪一级。"""
+    """加一个竞品进池。会先拉数据跑四同法则，再决定进不进、进哪一级。
+
+    `user_id` 是「谁加的 / 谁盯这个竞品」，只用于落 `competitor_bindings.user_id`，
+    不参与任何判定（分层是产品属性，与个人无关）。允许为 `None`：那样下游
+    `binding.upsert_from_judgment()` 会兜底到租户默认用户，与旧行为一致。
+    """
     tenant_id = tenant_id or settings.tenant_id
     asin = (asin or "").strip().upper()
     if not asin:
@@ -306,11 +312,14 @@ def add_competitor(
 
     # 分层理由落库成绑定 basis（谁认为这个竞品和自家哪个产品同战场）。
     # 失败只记日志：绑定是增强，不该让「加竞品」这件事回滚。
+    # `user_id` 只在这一处下传：绑定的归属人就是「谁加的」。
+    # 传 None 时由 binding 层兜底成默认用户（旧行为），不会写出一条 user_id 为空的绑定。
     try:
         from app.services import binding as binding_mod
         binding_mod.upsert_from_judgment(tenant_id=tenant_id, competitor_id=comp_id,
                                          my_product_id=my_id, tier=tier,
-                                         tier_reasons=res.tier_reasons)
+                                         tier_reasons=res.tier_reasons,
+                                         user_id=user_id)
     except Exception:  # noqa: BLE001
         logger.warning("写入对标绑定失败 competitor_id=%s", comp_id, exc_info=True)
 

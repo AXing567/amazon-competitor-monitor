@@ -70,7 +70,12 @@ async def push_p0_alerts(minutes: int = 90) -> int:
     sent = 0
     for item in items:
         text = briefer.build_alert_text(item)
-        ok = await router.push_alert(settings.tenant_id, text, item=item)
+        # 带上 `competitor_id`：路由层据此把这条预警发给「盯这个竞品的人」。
+        # `item.competitor_id` 可能是 None（例如历史数据），这里不做判断——
+        # 为 None 时路由层自然退回租户默认渠道，判断只留在一处。
+        ok = await router.push_alert(
+            settings.tenant_id, text, item=item, competitor_id=item.competitor_id
+        )
         if ok:
             sent += 1
     logger.info("P0 预警已推送 %d/%d 条", sent, len(items))
