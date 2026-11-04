@@ -76,7 +76,7 @@ class TestFmtRatioToShowSide:
 
 class TestRejectReasonNeverContradictsItself:
     def _judge_at(self, price: float):
-        """不带流量词——真实数据就是这样（该账号关键词模块无权益）。
+        """不带流量词——真实数据里常见（采集可能失败，见 test_provisional_tier）。
 
         为什么必须去掉词：门槛是「流量池 **或**（节点 **且** 价格带）」二选一，
         词重合够高时价格带出界也能保送（见 `judge_tier` 第 175 行）。

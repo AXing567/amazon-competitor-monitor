@@ -12,11 +12,15 @@ if overlap is None:
 `keyword_overlap is None` 的含义是**词维度根本没测出来**（拿不到流量词），
 但代码直接给出 `"B"`，而 `"B"` 的对外语义是「轻度重合，相邻战场」。
 于是「没测」被写成了「测了，不重合」——一句没有任何报错、面板上看起来
-完全正常的假话。真实数据把这件事暴露得很彻底：卖家精灵账号的关键词模块
-没有会员额度（`keywords/reverse` / `aba-reverse` / `keywords/research`
-三条通道全空 + notice），`keyword_overlap` 恒为 `None`，而 `price_ratio`
-与 `node_match` 都能判，于是 `decidable_dims == 2`、`insufficient is False`，
-**每一个竞品都会得到一个不带任何限定的 "B"**。
+完全正常的假话。真实数据把这件事暴露得很彻底：`keyword_overlap` 恒为 `None`，
+而 `price_ratio` 与 `node_match` 都能判，于是 `decidable_dims == 2`、
+`insufficient is False`，**每一个竞品都会得到一个不带任何限定的 "B"**。
+
+> 归因订正（2026-11-04 实测）：当时以为「账号关键词模块没有会员额度」，
+> **那是错的**——额度一直有，是 bridge 长进程的会话陈旧，页面返回了没有结果集的壳，
+> notice 把这种情况写成了「需要会员额度」。重启后同一个词返回月搜 702,084。
+> 但本文件守的行为不变：**任何一次采集都可能失败**（会话、风控、额度、ASIN 无收录），
+> 所以「没采到词时不许给裸字母档」这条不能因为额度恢复了就删。
 
 这跟本项目此前修掉的两类 bug 同族（`battlefield.my_asin` 被当绑定判据、
 `_effective_price` 拿标价顶替到手价）：**系统不知道自己不知道**。
@@ -55,9 +59,10 @@ MY_CORE = {"toy car": 0.4, "diecast car": 0.35}
 
 
 def _comp_without_keywords(asin: str = "B0PROV0001", **overrides) -> UnifiedSnapshot:
-    """竞品快照：价格有、类目路径有、**流量词没有**（关键词模块无额度）。
+    """竞品快照：价格有、类目路径有、**流量词没有**。
 
-    这正好是真实账号拿到的那份数据形状，也是原来会静默产出 "B" 的形状。
+    这是「采集没取到词」时的数据形状——会话失效、风控、额度耗尽、ASIN 本身无收录，
+    都会长成这样。也是原来会静默产出裸 "B" 的形状。
     """
     base: dict = {
         "asin": asin,

@@ -36,16 +36,24 @@
 | 标价 / 月销估算 / BSR / 评分 / 评论数 / 上架日期 / 品牌 / 标题 | **真**（公开数据） | 选品库 |
 | 类目节点 `node_match` | **构造保证**：候选是按节点筛出来的，不是猜的 | 选品库按 node_id_path 筛 |
 | 到手价（净价）、优惠券 | **拿不到** | 选品库只给标价 |
-| 流量词 / 词重合度 | **拿不到**（该账号关键词模块无权益，三条通道全空） | —— |
+| 流量词 / 词重合度 | **真**（由 `scripts/collect_keywords.py` 采、落盘缓存） | 选品库反查 |
 | 保本价 / 目标毛利率 / FBA 可售库存 / 补货周期 | **假设值**（卖家自己的账，外部给不出） | 本脚本按锚点反推 + 标 `assumed_fields` |
 | 日均销量 | **别人家的估算**（BSR 幂律模型），不是订单级真值 | 月销估算 ÷ 30 |
 | 退货率 | **无处可落**（模型没有这个字段）→ 本轮不参与任何判断 | —— |
 
+> 流量词这一行之前写的是「拿不到（该账号关键词模块无权益）」。**那句话是错的**：
+> 额度一直有，是 bridge 长进程的会话陈旧，页面返回了没有结果集的壳，而 notice
+> 把这种情况写成了「需要会员额度」。重启 bridge 后同一个词立刻返回月搜 702,084。
+> 教训记在这里：接口返回 0 条时，「没权限」和「没采到」是两件事，
+> 而它们的输出长得一模一样。
+
 由此，这一轮能信的结论和不能信的结论是分开的：
 
-- 能信：同战场识别（节点）、价格带是否重叠（标价对标的，双方同口径）、谁在价格带外
-- 只能暂定：S/A/B/C 的字母档。词重合缺一维，`judge_tier` 会给「中间档 B + 暂定」，
-  面板上必须读成「暂定 B」，不能读成「轻度重合」
+- 能信：同战场识别（节点）、价格带是否重叠（标价对标的，双方同口径）、谁在价格带外、
+  **词重合度**（锚点与竞品的核心出单词用同一套口径截取）
+- 只能暂定：只有那些**确实没采到词**的竞品（缓存里没有它的文件）。有词的竞品
+  给出的是真档位，`provisional` 为 False。
+  面板上没词的必须读成「暂定 B」，不能读成「轻度重合」
 - 不能用：断货预警、提价/降价空间、补货建议（依赖假设值）
 
 ## 观察窗口（采样偏差，必须知道）
@@ -130,6 +138,9 @@ DEMO_DB_PATH = ROOT / "data" / "demo_offline.db"
 DEFAULT_PILOT_DB_PATH = ROOT / "data" / "pilot.db"
 
 RAW_DIR = ROOT / "data" / "pilot_raw"
+
+#: `collect_keywords.py` 落盘的流量词缓存（一个 ASIN 一个文件，可断点续跑）。
+KEYWORD_CACHE_DIR = RAW_DIR / "keyword_cache"
 
 #: pilot 用的类目节点（`/market/research` 返回的真实节点）。
 #: 候选全部来自这个节点——这就是「同战场」的**构造保证**，
@@ -417,6 +428,22 @@ def _pick_candidates(items: list[dict], anchor_asin: str, limit: int) -> list[di
 # ============================================================
 
 
+def _core_words(asin: str) -> dict[str, float] | None:
+    """锚点的核心出单词 {词: 流量占比}，取法与竞品完全一致。
+
+    用 `UnifiedSnapshot.core_keyword_weights(0.8)` 而不是自己再写一遍累加：
+    两边口径一旦不同，「词重合度」算的就是两套不同词集的交集，
+    而结果看上去和真的没有区别。
+    """
+    kws = _load_keywords(asin)
+    if not kws:
+        return None
+    weights = UnifiedSnapshot(
+        asin=str(asin).upper(), marketplace="US", keywords=kws
+    ).core_keyword_weights(0.8)
+    return weights or None
+
+
 def _anchor_fields(item: dict) -> dict:
     """把一条真实商品行翻译成自家锚点字段。
 
@@ -435,8 +462,10 @@ def _anchor_fields(item: dict) -> dict:
 
     break_even = round(price * (1 - margin), 2) if price > 0 and 0 < margin < 1 else None
 
+    asin = str(item.get("asin") or "").upper()
+
     fields = {
-        "asin": str(item.get("asin") or "").upper(),
+        "asin": asin,
         "title": item.get("title"),
         "image_url": item.get("image_url"),
         "current_price": price or None,
@@ -454,8 +483,10 @@ def _anchor_fields(item: dict) -> dict:
         # `inventory_status="unknown"` 会如实告诉人"这条判断现在做不了"。
         "fba_available_units": None,
         "lead_time_days": 35,
-        # 关键词：该账号关键词模块无权益，一首都拿不到。留空 → 词重合恒 None。
-        "core_keywords": None,
+        # 锚点自己的出单词——这是 `calc_keyword_overlap` 的分子分母来源。
+        # 取法必须和竞品一致（`core_keyword_weights` 按流量占比累计到 80%），
+        # 两边口径不同的话，「重合度」会比的是两套不同的词集。
+        "core_keywords": _core_words(asin),
         "source": baseline_mod.SOURCE_SELLERSPRITE,
         "assumed_fields": [
             "break_even_price",
@@ -490,7 +521,35 @@ def _write_anchor(item: dict) -> dict:
 # ============================================================
 
 
-def _snapshot_from_item(item: dict, *, captured_at: datetime) -> UnifiedSnapshot:
+def _load_keyword_payload(asin: str) -> tuple[list[dict], int | None]:
+    """读 `collect_keywords.py` 落盘的流量词，连同**词库总词数**一起返回。
+
+    总词数是必须的：上游每个 ASIN 只回 20 个词，而真实词库可以到 2000+。
+    不带这个数，`calc_keyword_overlap` 会把「1% 抽样里没撞上主力词」算成
+    「重合 0」——一个看起来像证据、实际上只是抽样假象的数字。
+    """
+    path = KEYWORD_CACHE_DIR / f"{str(asin).upper()}.json"
+    if not path.exists():
+        return [], None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return [], None
+    return payload.get("keywords") or [], payload.get("traffic_keywords_total")
+
+
+def _load_keywords(asin: str) -> list[dict]:
+    """只要词列表。缺文件 = 没采过，返回空列表。"""
+    return _load_keyword_payload(asin)[0]
+
+
+def _snapshot_from_item(
+    item: dict,
+    *,
+    captured_at: datetime,
+    keywords: list[dict] | None = None,
+    traffic_keywords_total: int | None = None,
+) -> UnifiedSnapshot:
     """选品库的一行 → 统一快照。
 
     两个字段刻意留空，理由写在下面（这是本轮最容易被"顺手填上"的地方）：
@@ -498,12 +557,15 @@ def _snapshot_from_item(item: dict, *, captured_at: datetime) -> UnifiedSnapshot
     - `net_price` / `price_source`：选品库只给标价，拿不到券和到手价。
       把标价塞进 `net_price` 会让 `_effective_price()` 认为「价格已确认」，
       于是降价判断开始拿标价当到手价用——正是那个被修过的事故。
-    - `keywords`：账号无权益，一首都拿不到。留空 = 「没采到」，
-      下游据此把词维度算作 `None`（而不是 0 重合）。
+    - `keywords`：**由调用方从缓存传入**，缺缓存就是空列表。
+      空列表的含义是「没采到」，下游据此把词维度算作 `None`（而不是 0 重合）。
+      注意这里曾经写死 `keywords=[]`，注释是「账号无权益」——那句话是猜的，
+      而且猜错了：额度一直是有的，只是 bridge 长进程的会话陈旧 + 没人调采集脚本。
 
     `category_path` 填节点路径，来源是「按这个节点筛的」，不是商品详情页读的
     （那个字段在选品库返回里恒为空）。这条是构造保证，不是抄来的事实。
     """
+    kws = list(keywords or [])
     return UnifiedSnapshot(
         asin=str(item.get("asin") or "").upper(),
         marketplace="US",
@@ -522,8 +584,10 @@ def _snapshot_from_item(item: dict, *, captured_at: datetime) -> UnifiedSnapshot
         release_date=(str(item.get("release_date"))[:10] if item.get("release_date") else None),
         fulfillment_type=item.get("seller_type"),
         category_path=list(NODE_LABELS),
-        keywords=[],
-        # partial 而不是 full：标价拿不到券、没有流量词、没有库存。
+        keywords=kws,
+        # 词库总量 vs 实际拿到的条数 → 下游据此判断「重合 0」能不能作数。
+        traffic_keywords_total=traffic_keywords_total,
+        # 有词才够 full 的资格；没词仍然是 partial。
         # 报 full 会让数据健康页把这批快照算成"采全了"。
         data_quality="partial",
         # 与五接口聚合的 `sellersprite` 区分开：这批是选品库一次批量拉的。
@@ -572,7 +636,10 @@ def _write_one(
     入池规则同 `pool.add_competitor`：没通过四同法则就不放进池子（`status="observing"`
     留给 force 的场景）；证据不足（可判维度 < 2）不拒，标 unknown 等补数据。
     """
-    snap = _snapshot_from_item(item, captured_at=captured_at)
+    _kws, _kw_total = _load_keyword_payload(item.get("asin"))
+    snap = _snapshot_from_item(
+        item, captured_at=captured_at, keywords=_kws, traffic_keywords_total=_kw_total
+    )
     res = judge_tier(
         my_price=my.current_price,
         my_core_keywords=dict(my.core_keywords or {}),
@@ -610,6 +677,9 @@ def _write_one(
         "passed": res.passed,
         "provisional": res.provisional,
         "missing_dims": list(res.missing_dims),
+        "sample_thin": bool(res.tier_reasons.get("keyword_sample_thin")),
+        "word_count": res.tier_reasons.get("keyword_word_count"),
+        "keyword_overlap": res.keyword_overlap,
         "reject_reason": res.reject_reason,
         "admitted": admitted,
     }
@@ -786,6 +856,11 @@ def _row_note(row: dict) -> str:
         # 否则面板上「A 级」看起来和「measured」一样硬。
         return "黑马（上架 90 天内 + 月销 ≥ 1000，月销为模型估算）"
     if row["provisional"]:
+        # 采样太薄和压根没采到是两件事：前者查上游返回条数，后者查采集。
+        # 在报告里写成同一句，会把人送去查一个没有问题的地方。
+        if row.get("sample_thin"):
+            got = row.get("word_count")
+            return f"竞品词库抽样薄（{got} 词）→ 暂定" if got else "竞品词库抽样薄 → 暂定"
         # 缺的中文名从引擎拿，别在这里再写一份（两处措辞总有一天会分叉）
         from app.domain.tiering import missing_dim_labels
 

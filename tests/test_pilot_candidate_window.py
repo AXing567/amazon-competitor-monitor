@@ -135,3 +135,31 @@ class TestCandidateFiltersStillHold:
         row = _row("NOBSR0001", 22.99, 200)
         row["bsr_rank"] = None
         assert pilot._pick_candidates([_anchor_row(), row], ANCHOR, 0) == []
+
+
+class TestKeywordCache:
+    """关键词缓存的读法：缺文件 = 没采过，不能变成「词重合 0」。"""
+
+    def test_missing_file_returns_empty_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pilot, "KEYWORD_CACHE_DIR", tmp_path)
+        assert pilot._load_keywords("B0NOCACHE1") == []
+
+    def test_corrupt_file_returns_empty_list_not_crash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pilot, "KEYWORD_CACHE_DIR", tmp_path)
+        (tmp_path / "B0BROKEN01.json").write_text("{{ not json", encoding="utf-8")
+        assert pilot._load_keywords("B0BROKEN01") == []
+
+    def test_cached_file_is_read(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setattr(pilot, "KEYWORD_CACHE_DIR", tmp_path)
+        (tmp_path / "B0CACHED01.json").write_text(
+            json.dumps({"keywords": [{"keyword": "dish rack", "traffic_share": 1.0}]}),
+            encoding="utf-8",
+        )
+        assert pilot._load_keywords("B0CACHED01")[0]["keyword"] == "dish rack"
+
+    def test_core_words_returns_none_without_cache(self, tmp_path, monkeypatch):
+        """拿不到词时必须是 None，不能是 {}——后者会被当成「算过，重合 0」。"""
+        monkeypatch.setattr(pilot, "KEYWORD_CACHE_DIR", tmp_path)
+        assert pilot._core_words("B0NOCACHE2") is None
