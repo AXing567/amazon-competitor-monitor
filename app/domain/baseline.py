@@ -369,10 +369,14 @@ def assess(my_product) -> BaselineAssessment:
     has_be_price = _has_value(getattr(my_product, "break_even_price", None))
     has_margin = _has_value(getattr(my_product, "target_margin_rate", None))
     has_kw = bool(getattr(my_product, "core_keywords", None))
+    has_path = _has_value(getattr(my_product, "category_path", None))
     has_title = _has_value(getattr(my_product, "title", None))
 
-    # 分层只要有价格 + 核心词就能跑（节点匹配是加分项）
-    res.can_tier = has_price and has_kw
+    # 分层只要有价格 + **任一**判定维度就够跑（`judge_tier` 的准入门槛是
+    # 「能判的维度 ≥ 2」，价格带算一维，词重合与节点各算一维）。
+    # 这里以前只认 `core_keywords`，节点维度接通之后就变成了一句假话：
+    # 面板说「分层跑不了」，同一个库里 17 个竞品却都分好了层。
+    res.can_tier = has_price and (has_kw or has_path)
 
     # 跟价判断必须要保本价；毛利可以后补
     res.can_judge_price_follow = has_price and (has_be_price or has_margin)
@@ -397,7 +401,10 @@ def assess(my_product) -> BaselineAssessment:
         )
     if not has_kw:
         res.warnings.append(
-            "缺核心出单词：分层会退化为只按价格带判断，容易把无关竞品拉进池子。"
+            "缺核心出单词：分层只能靠价格带 + 类目节点两项，同品但挂在别的类目下的竞品"
+            "会被节点判掉（跨类目的同类品是常见情况）。"
+            if has_path
+            else "缺核心出单词：分层会退化为只按价格带判断，容易把无关竞品拉进池子。"
         )
     if not _has_value(getattr(my_product, "category_path", None)):
         # 这一条以前不存在，因为 `category_path` 这个字段本身不存在（硬编码 None），

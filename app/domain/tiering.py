@@ -147,6 +147,10 @@ def judge_tier(
         # 是 JSON 列），面板读的是库里的那一份，不是内存里的对象。
         # 只有部分行有这个键，会让面板的 `.get()` 长出一堆「有/没有」两种分支。
         "provisional": False,
+        # `black_horse` 回答的是「这个 A 是怎么来的」：A 有两个来源——黑马，
+        # 或词重合够高。没有这个键时两者在数据上完全同形，面板只能猜，
+        # 而猜错的方向恰好是「A 级 · 强相关」——一句拿上架天数换来的断言。
+        "black_horse": False,
         "missing_dims": list(res.missing_dims),
     }
 
@@ -191,7 +195,15 @@ def judge_tier(
     # 词重合没测出来时，`_decide_letter_tier` 会给出 "B"（理由见那里）。
     # 那个 B 必须带上「暂定」，否则它和「测过了、轻度重合」在数据上完全同形，
     # 面板只能照着读成「重合度中等」——一句我们没有任何证据支持的话。
-    if res.keyword_overlap is None:
+    #
+    # 黑马那条路**例外**：A 的依据是「上架 90 天内 + 月销 ≥1000」，两者都不看词维度，
+    # 所以它不需要「暂定」来免责。原来一刀切成暂定，面板会说
+    # 「A 级（暂定：缺词重合）」——档位是确定的，却被标成"凭缺的那一维猜的"，
+    # 反过来伤了黑马这条判据的可信度。
+    res.tier_reasons["black_horse"] = bool(
+        res.tier == "A" and _is_new_black_horse(comp)
+    )
+    if res.keyword_overlap is None and not res.tier_reasons["black_horse"]:
         res.provisional = True
         res.provisional_reason = provisional_reason(res.missing_dims)
 

@@ -85,6 +85,7 @@ def build_basis_summary(
     th = thresholds or TieringThresholds()
     reasons = dict(tier_reasons or {})
     provisional = bool(reasons.get("provisional"))
+    black_horse = bool(reasons.get("black_horse"))
 
     parts: list[str] = []
 
@@ -113,7 +114,11 @@ def build_basis_summary(
                 f"（这一档是按{'、'.join(tiering_mod.missing_dim_labels(kept)) or '其余维度'}暂定的）"
             )
         else:
-            parts.append("缺少流量词数据，重合度未计算")
+            parts.append(
+                "未测流量词（黑马判定不看这一维）"
+                if black_horse
+                else "缺少流量词数据，重合度未计算"
+            )
     else:
         parts.append(
             f"加权词重合 {overlap:.0%}"
@@ -140,6 +145,10 @@ def build_basis_summary(
         # 不许写成「判为 C 级」或「判为 unknown 级」：C 是结论，unknown 是还没结论。
         # 也不许写成「暂定」：暂定是「有字母级但依据不全」，unknown 是「连字母级都没有」。
         head = "待判定（证据不足）："
+    elif black_horse:
+        # 黑马的依据是上架天数 + 月销，不是相关度。头部就把来源说出来，
+        # 否则读者会把它当成「词重合很高」那一类 A。
+        head = f"新品黑马 {tier} 级（上架 90 天内 + 月销 ≥1000）："
     elif provisional:
         head = f"暂定 {tier} 级："
     return head + "；".join(parts)

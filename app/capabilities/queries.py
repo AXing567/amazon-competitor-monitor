@@ -63,6 +63,11 @@ TIER_LABELS: dict[str, str] = {
     TIER_UNKNOWN: "待判定（证据不足）",
 }
 
+#: 黑马档的标签。**不复用** `TIER_LABELS["A"]`：A 有两个来源，一个是词重合够高
+#: （那时「强相关」成立），一个是上架 90 天内 + 月销过千（这时没有任何相关度证据）。
+#: 用同一句话覆盖两种来源，就是把「没测过」写成「测过了」。
+BLACK_HORSE_LABEL = "A 级 · 新品黑马（上架 90 天内）"
+
 STATUS_VALUES: tuple[str, ...] = ("active", "paused", "archived")
 
 
@@ -98,6 +103,11 @@ def _tier_label(tier: str, tier_reasons: Optional[dict] = None) -> str:
         return base
 
     reasons = dict(tier_reasons or {})
+    # 黑马要**先看**：它是 A 的另一个来源，依据是「上架 90 天内 + 月销 ≥1000」，
+    # 跟相关度无关。落到下面的 `TIER_LABELS["A"]`（「A 级 · 强相关」）会把
+    # 「靠上架天数升上来的」说成「高度相关」——同一句断言，两个来源。
+    if reasons.get("black_horse"):
+        return BLACK_HORSE_LABEL
     if not reasons.get("provisional"):
         return base
 

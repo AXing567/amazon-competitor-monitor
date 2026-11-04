@@ -508,3 +508,100 @@ def test_board_view_says_provisional_not_pending():
     for parse in ("tier_label.indexOf", "tier_label.includes", "tier_label.match"):
         assert parse not in src, f"看板页开始解析标签文案（{parse}）"
 
+
+
+# ============================================================
+# ④ 黑马档：A 的另一个来源，不能借「暂定」免责，也不能借「强相关」拔高
+#
+# 真实数据里第一次出现 A 级就是这个形状：上架 30 天、月销 3000、没有流量词。
+# 修 `provisional` 之前，面板显示「A 级 · 强相关（暂定：缺词重合）」——
+# 一句话里同时说「高度相关」和「不知道相不相关」。
+# ============================================================
+
+
+def _comp_black_horse(asin: str = "B0HORSE0001") -> UnifiedSnapshot:
+    """黑马形状：上架 30 天、月销 3000、同样拿不到流量词。"""
+    from datetime import date, timedelta
+
+    return UnifiedSnapshot(
+        asin=asin,
+        price=24.99,
+        category_path=list(MY_PATH),
+        keywords=[],
+        monthly_units=3000,
+        release_date=(date.today() - timedelta(days=30)).isoformat(),
+    )
+
+
+def test_black_horse_is_not_marked_provisional():
+    """黑马的 A 是确定的：依据是上架天数 + 月销，两者都不看词维度。
+
+    标成「暂定」会反过来伤它——档位明明有依据，却被说成"凭缺的那一维猜的"。
+    """
+    res = judge_tier(
+        my_price=MY_PRICE,
+        my_core_keywords=dict(MY_CORE),
+        my_category_path=list(MY_PATH),
+        my_daily_units=120,
+        comp=_comp_black_horse(),
+    )
+    assert res.tier == "A", res.tier
+    assert res.tier_reasons["black_horse"] is True
+    assert res.provisional is False, "黑马不该被标暂定"
+
+
+def test_black_horse_label_says_black_horse_not_strong_related():
+    """标签要说清 A 是哪来的；「强相关」只能用于词重合够高的那个 A。"""
+    reasons = {"black_horse": True, "provisional": False}
+    label = queries_cap._tier_label("A", reasons)
+    assert "黑马" in label, label
+    assert "强相关" not in label, label
+
+    # 非黑马、无暂定的 A 仍是原来的措辞（不许把这句一起改掉）
+    assert queries_cap._tier_label("A", {"black_horse": False}) == queries_cap.TIER_LABELS["A"]
+
+
+def test_black_horse_basis_summary_says_why():
+    """人话理由的头部要说「新品黑马」+ 依据，别把读者引到「词重合很高」上去。"""
+    summary = binding.build_basis_summary(
+        {"black_horse": True, "provisional": False, "price_ratio": 0.83,
+         "price_band_ok": True, "keyword_overlap": None, "node_match": True},
+        tier="A",
+    )
+    assert "新品黑马" in summary, summary
+    assert "上架 90 天内" in summary, summary
+
+
+def test_can_tier_true_without_keywords_when_node_path_present():
+    """锚点没有核心词、但有类目路径时，分层是**能跑**的（价格 + 节点 = 2 维）。
+
+    原来 `can_tier = has_price and has_kw`，于是体检说「分层跑不了」，
+    而同一个库里 17 个竞品都分好了层——体检与事实自相矛盾。
+    """
+    from types import SimpleNamespace
+
+    from app.domain import baseline as baseline_mod
+
+    anchor = SimpleNamespace(
+        asin="B0MINE0001",
+        current_price=22.99,
+        break_even_price=10.58,
+        target_margin_rate=0.25,
+        core_keywords=None,
+        category_path=["Home & Kitchen", "Dish Racks"],
+        daily_sales_avg=111.5,
+        fba_available_units=None,
+        lead_time_days=35,
+        sub_category_rank=None,
+        rating=4.8,
+        review_count=5335,
+        title="x",
+        image_url=None,
+        bullet_points=None,
+        assumed_fields=[],
+    )
+    res = baseline_mod.assess(anchor)
+    assert res.can_tier is True
+    # 缺词这条告警要跟着改准确：现在只剩「价格带 + 类目节点」两项，而不是「只按价格带」
+    kw_warn = [w for w in res.warnings if "缺核心出单词" in w]
+    assert kw_warn and "类目节点" in kw_warn[0], kw_warn
