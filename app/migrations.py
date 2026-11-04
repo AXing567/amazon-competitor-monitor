@@ -77,6 +77,14 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("actions", "signal_id", "INTEGER"),          # 依据哪条信号
     ("actions", "reason", "TEXT"),                # 人话依据
     ("actions", "source", "VARCHAR(16)"),         # panel / feishu_card / agent / system
+
+    # snapshots / my_products：补齐分层判断缺的两个维度（见 tiering.py 的 TODO）。
+    # 都是 JSON 列，因为存的是**原始列表**而不是算好的结果：
+    # 权重算法将来会调，存结果就没法用新算法回溯历史。
+    # SQLite 里 JSON 只是带 JSON 校验钩子的 TEXT，ADD COLUMN 对它没有额外限制。
+    ("snapshots", "category_path", "JSON"),       # 竞品类目路径
+    ("snapshots", "keywords", "JSON"),            # 竞品流量词
+    ("my_products", "category_path", "JSON"),     # 自家类目路径（节点维度只认它）
 ]
 
 #: 索引：(索引名, 表名, 依赖列, DDL)。

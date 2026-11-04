@@ -98,7 +98,10 @@ def _missing_dims(item: dict) -> list[str]:
     if item.get("keyword_overlap") is None:
         out.append("缺流量词（快照里没有 keywords）")
     if item.get("node_match") is None:
-        out.append("缺类目路径（自家产品未落 category_path）")
+        # 措辞要同时覆盖两种原因：竞品快照里没有、或自家锚点没配。
+        # 之前这里写死了"自家产品未落 category_path"，于是锚点明明配好了、
+        # 只是竞品没采到，面板也会指着用户说"你没配"——指向错误的方向。
+        out.append("缺类目路径（竞品快照或自家锚点缺 category_path）")
     return out
 
 

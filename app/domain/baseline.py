@@ -247,6 +247,15 @@ def assess(my_product) -> BaselineAssessment:
         res.warnings.append(
             "缺核心出单词：分层会退化为只按价格带判断，容易把无关竞品拉进池子。"
         )
+    if not _has_value(getattr(my_product, "category_path", None)):
+        # 这一条以前不存在，因为 `category_path` 这个字段本身不存在（硬编码 None），
+        # 于是「节点维度判不了」这件事从来没被说出来过——池子里一堆「待判定」
+        # 而配置页看起来一切正常。缺什么就说缺什么。
+        res.warnings.append(
+            "缺自家类目路径：分层判断的「节点」维度无法判定，同一类目下的竞品"
+            "只能靠价格和流量词去猜，交叉品类的会被误判。填一次即可（如 "
+            '["Toys & Games", "Toy Vehicles", "Play Trucks"]）。'
+        )
     if dos is None:
         res.warnings.append(
             "缺库存或日均销量：算不出可售天数，进攻窗口的判断会被跳过（不会出错，但会漏机会）。"

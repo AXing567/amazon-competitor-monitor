@@ -82,6 +82,11 @@ class MyProduct(Base):
     # --- 4. 核心出单词 {keyword: trafficPercentage} ---
     core_keywords: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # --- 4b. 自家类目路径 ["Toys & Games", "Toy Vehicles", "Play Trucks"] ---
+    # 分层判断的「节点」维度只认这个：竞品和自家落在同一节点下，才算同一个战场。
+    # 没有它，`node_match` 恒为 None，交叉品类判断就只能靠价格和词重合硬猜。
+    category_path: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # --- 5. Listing 基线 ---
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -204,6 +209,18 @@ class Snapshot(Base):
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # 类目路径：["Toys & Games", "Toy Vehicles", "Play Trucks"]
+    # 为什么要落库：分层判断的「节点」维度靠它。不存的话每次重算都要重新采一遍，
+    # 而它一天只变一次——为同一个值反复消耗采集额度是最容易忽略的浪费。
+    category_path: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    # 流量词：[{keyword, search_volume, organic_rank, sponsored_rank, traffic_share}]
+    # 为什么要落库：`judge_tier` 的「流量池」维度靠它算加权词重合度。
+    # 这是慢通道数据（单次 5~15s、有配额），采到不存 = 每轮都白采一次。
+    # 存**原始列表**而不是算好的权重：权重算法（`core_keyword_weights` 的 coverage）
+    # 将来会调，存结果就没法回溯重算了。
+    keywords: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     # 元信息
     data_quality: Mapped[str] = mapped_column(String(16), default="partial")

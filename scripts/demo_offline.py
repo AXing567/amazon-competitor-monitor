@@ -229,7 +229,54 @@ DEMO_MY = {
     "rating": 4.6,
     "review_count": 812,
     "title": "Demo Toy Car (Our Listing)",
+    # 分层判断的「节点」维度靠它。演示里必须填一次，
+    # 否则所有竞品的 node_match 都是 None，面板上又会变成一整列"待判定"。
+    "category_path": ["Toys & Games", "Toy Vehicles", "Play Trucks"],
 }
+
+#: 演示竞品的流量词。真实数据来自卖家精灵的 traffic-keywords（5 个接口之一），
+#: 这里用固定值代替，但**形状和真实返回一致**——演示要是用了简化形状，
+#: 它验证的就不是生产链路了。
+#: 每个层级分到哪几个词。**不是装饰**：`judge_tier` 的加权重合度 =
+#: 自家核心词里被竞品也覆盖的那些词的权重占比，所以竞品覆盖 3 个词的会算 S，
+#: 覆盖 2 个的算 A，只覆盖 1 个的算 B，一个都不覆盖的算 C。
+#: 如果所有竞品共用同一份词表，重算一遍会得到 8 个一模一样的层级——
+#: 面板上「S 级对手」和「C 级」就变成同一个东西，演示反而证明了系统没用。
+_DEMO_KW_BY_TIER: dict[str, list[str]] = {
+    "S": ["toy car", "diecast car", "kids toy car"],
+    "A": ["toy car", "diecast car"],
+    "B": ["toy car"],
+    # C 级刻意是**完全不相干**的词：重合度算出来是 0.0 而不是 None。
+    # 这个区别很重要——0.0 是「判过了，不重合」，None 是「判不了」。
+    "C": ["puzzle", "board game"],
+    "unknown": [],
+}
+
+#: 体量：S/A 要和自家的日均销量咬合（0.8x~2.5x），否则算法会把它降成 A。
+_DEMO_UNITS_BASE: dict[str, int] = {"S": 1250, "A": 1150, "B": 1000, "C": 600}
+
+
+def _demo_keywords(scen: dict) -> Optional[list[dict]]:
+    """按层级给一套词。`unknown` 返回 None（这条演示的就是"没数据"）。"""
+    tier = str(scen.get("tier") or "unknown").upper()
+    picked = _DEMO_KW_BY_TIER.get(tier)
+    if not picked:
+        return None
+    share = 0.34
+    out: list[dict] = []
+    for i, word in enumerate(picked):
+        out.append(
+            {
+                "keyword": word,
+                "traffic_share": round(share / (i + 1), 4),
+                "search_volume": 120000 // (i + 1),
+                "organic_rank": 8 + i * 5,
+                "sponsored_rank": None,
+            }
+        )
+    return out
+
+DEMO_COMP_PATH = ["Toys & Games", "Toy Vehicles", "Play Trucks"]
 
 
 # ============================================================
@@ -269,8 +316,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "brand": "ThirdBrand",
         "tier": "B",
         "days": 9,
-        "base_price": 15.99,
-        "price_changes": {3: 17.49},   # 涨价 = 我的提价窗口
+        # 价格必须落在自家价格带内（0.7x~1.4x，即 21.0~42.0），否则
+        # `price_ok` 为假，四同法则会把它判成 C——而这条演示的是 B 级。
+        # 15.99 只有 0.53x，属于另一个价格带的对手，本来就不该进这个池子。
+        "base_price": 21.99,
+        "price_changes": {3: 23.99},   # 涨价 +9.1% = 我的提价窗口
         "rating_changes": {3: 4.2},
         # 昨天详情页 503：健康页要有**两条不同竞品**的失败，
         # 只有一条时看不出「失败是按竞品分散的，还是一直卡在同一个 ASIN 上」。
@@ -292,6 +342,9 @@ SCENARIOS: list[dict[str, Any]] = [
         "title": "Demo Toy Car · 待判定（缺证据）",
         "brand": "MysteryBrand",
         "tier": "unknown",
+        # 这条演示的是「缺证据 → 待判定，且不硬判成 C」。
+        # 缺的正是流量词与类目路径这两维——所以下面写快照时**刻意不给**。
+        "missing_dims": True,
         "days": 7,
         "base_price": 24.99,
         "price_changes": {2: 23.99},
@@ -940,7 +993,12 @@ def _seed_history(scen: dict, cid: int) -> int:
                 rank_main=_pick(32000, scen.get("rank_changes"), days_ago),
                 rank_sub=_pick(2800, scen.get("rank_changes"), days_ago),
                 rank_label="Toys & Games",
-                monthly_units=_pick(900, scen.get("units_changes"), days_ago),
+                # 体量随层级走：S/A 要与自家（日均 40）咬合，否则 S 会被降成 A
+                monthly_units=_pick(
+                    _DEMO_UNITS_BASE.get(str(scen.get("tier") or "").upper(), 900),
+                    scen.get("units_changes"),
+                    days_ago,
+                ),
                 monthly_revenue=_pick(27000.0, None, days_ago),
                 rating=_pick(4.5, scen.get("rating_changes"), days_ago),
                 review_count=_pick(500, scen.get("review_changes"), days_ago),
@@ -948,6 +1006,10 @@ def _seed_history(scen: dict, cid: int) -> int:
                 stock_hint="IN_STOCK" if in_stock else "OOS",
                 title=title,
                 image_url=None,
+                # 分层判断的两维：不给就是 None（不猜）。0005 刻意留空，
+                # 用来演示「证据不足 → unknown」这条线。
+                keywords=_demo_keywords(scen),
+                category_path=None if scen.get("missing_dims") else list(DEMO_COMP_PATH),
                 data_quality=quality,
                 source="demo",
             )

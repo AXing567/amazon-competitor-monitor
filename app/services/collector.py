@@ -322,6 +322,12 @@ def _save_snapshot(s: Session, competitor_id: int, snap: UnifiedSnapshot) -> Sna
         title=snap.title,
         image_url=snap.image_url,
         content_hash=snap.title,          # 用标题做轻量指纹，够用
+        # 分层判断要用的两个维度。空列表存 None 而不是 []：
+        # 「没采到」（None）和「采到了但确实为空」在排查时是两件事，
+        # 而 JSON 列的 `[]` 会被读成一个合法的空结果。这里两侧都当"无数据"处理，
+        # 但库里保留区别，出问题时能看出是哪一种。
+        category_path=snap.category_path or None,
+        keywords=snap.keywords or None,
         data_quality=snap.data_quality,
         source=snap.source,
     )
@@ -463,6 +469,10 @@ def row_to_unified(row: Snapshot, marketplace: str = "US") -> UnifiedSnapshot:
     关于 price_source：net_price 只可能由 promotions 接口写入，
     所以「有 net_price」等价于「当轮促销接口成功」。用这个等价关系反推，
     不必给快照表加列。
+
+    关于 keywords / category_path：这两列是后补的（老库里是 NULL），
+    所以这里必须容忍 None。**不要**把 None 补成 `[]` 之后再存回去——
+    那会把"从没采到过"写成"采到了但为空"，而这正好是本项目最忌讳的那种混淆。
     """
     return UnifiedSnapshot(
         asin="",
@@ -484,6 +494,8 @@ def row_to_unified(row: Snapshot, marketplace: str = "US") -> UnifiedSnapshot:
         buybox_owner=row.buybox_owner,
         title=row.title,
         image_url=row.image_url,
+        category_path=list(row.category_path or []),
+        keywords=list(row.keywords or []),
         data_quality=row.data_quality,
         source=row.source,
         captured_at=row.captured_at,

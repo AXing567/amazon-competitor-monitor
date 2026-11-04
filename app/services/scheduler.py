@@ -130,7 +130,7 @@ async def job_pool_maintenance() -> None:
             res = judge_tier(
                 my_price=my.current_price,
                 my_core_keywords=my.core_keywords or {},
-                my_category_path=None,
+                my_category_path=list(my.category_path or []) or None,
                 my_daily_units=my.daily_sales_avg,
                 comp=snap,
                 functional_match=comp.functional_match,

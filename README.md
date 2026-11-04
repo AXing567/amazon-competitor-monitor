@@ -425,12 +425,17 @@ python run.py --no-scheduler
 
 ### 已知缺口（不要当成已完成）
 
-- `snapshots.keywords` 还没落库 → 分层判断的流量词维度恒为缺失，`decidable_dims` 常年 < 3，
-  所以部分竞品的层级会是 `unknown`（待判定）。这是**故意的**：拿不到证据就不判，
-  比猜一个 C 级好——猜错的代价是漏掉一个真正的 S 级对手。
-- `my_products.category_path` 还是硬编码 `None` → 类目维度同样无法判定。
-- 上述两条补齐后 `decidable_dims` 会从 2 变 3，`unknown` 会大幅减少。`app/domain/tiering.py`
-  里那段兜底分支**不要删**，它是缺数据时的正确行为。
+- **分层判断的三个维度现在都能拿到数据了**（价格带 / 流量池 / 节点）：
+  `snapshots.keywords`、`snapshots.category_path`、`my_products.category_path`
+  三列已经落库，采集时写入、重算时还原。演示数据实测 8 个竞品里 7 个 `decidable_dims = 3`。
+- **但 `unknown` 不会消失，也不该消失**：卖家精灵的流量词是慢通道（单次 5~15 秒、
+  有配额上限），批量采集时仍可能拿不到——那时 `keywords` 就是 `None`，
+  `decidable_dims` 掉到 1，层级如实标成「待判定」。这是**故意的**：
+  拿不到证据就不判，比猜一个 C 级好——猜错的代价是漏掉一个真正的 S 级对手。
+- `app/domain/tiering.py` 里 `insufficient` 那段兜底**不要删**。它是"维度不足以判定"的
+  护栏，不是这次补数据的临时补丁——以后再加维度，同样会出现"某几维暂时没有"的情况。
+- 自家锚点不填 `core_keywords` / `category_path` 时，对应维度仍然判不了
+  （`check_anchor` 会直接告诉你缺哪一项、导致哪个判断失灵）。
 
 
 ---

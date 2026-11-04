@@ -117,6 +117,7 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
         "title",
         "image_url",
         "core_keywords",
+        "category_path",
     }
 
     updated: list[str] = []
@@ -188,7 +189,10 @@ def add_competitor(
         my_price = my.current_price
         my_keywords = my.core_keywords or {}
         my_daily = my.daily_sales_avg
-        my_path = None
+        # 自家类目路径。以前这里是硬编码 None，导致 `node_match` 恒为 None、
+        # `decidable_dims` 永远差一格，整池被标成「待判定」。
+        # 现在从锚点上读；没配就还是 None（不猜），由 unknown 如实反映。
+        my_path = list(my.category_path or []) or None
 
         exists = s.execute(
             select(Competitor).where(
@@ -521,6 +525,8 @@ def _my_to_dict(my: MyProduct) -> dict:
         "rating": my.rating,
         "review_count": my.review_count,
         "core_keywords_count": len(my.core_keywords or {}),
+        # 路径本身也返回：只给个数的话，用户没法确认自己填对了没有。
+        "category_path": list(my.category_path or []),
         "readiness": a.readiness,
         "grade": a.grade,
         "warnings": a.warnings,

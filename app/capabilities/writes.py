@@ -128,6 +128,43 @@ def set_baseline(ctx: CapContext, **kwargs) -> dict:
             "hint": "例如 {\"asin\": \"B0XXXXXXXX\", \"current_price\": 29.99, "
                     "\"break_even_price\": 19.5, \"daily_sales_avg\": 12}",
         }
+    # 形状校验放在这里而不是靠 T_JSON：T_JSON 只保证"是合法 JSON"，
+    # 而这两种值一旦形状不对，坏的不是这次调用，是**以后每一次分层判断**
+    # （比如 category_path 存成字符串，`node_match` 会静默变成 None，
+    # 整池重新变成"待判定"，而没有任何一处会报错）。
+    path = fields.get("category_path")
+    if path is not None:
+        if not isinstance(path, list) or not all(
+            isinstance(x, str) and x.strip() for x in path
+        ):
+            return {
+                "ok": False,
+                "error": "category_path 必须是由非空字符串组成的列表",
+                "error_kind": "param",
+                "hint": '例如 ["Toys & Games", "Toy Vehicles", "Play Trucks"]，'
+                        "从一级类目到最细节点依次写。",
+            }
+        fields["category_path"] = [x.strip() for x in path]
+
+    kws = fields.get("core_keywords")
+    if kws is not None:
+        if not isinstance(kws, dict) or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in kws.values()
+        ):
+            return {
+                "ok": False,
+                "error": "core_keywords 必须是 {词: 流量占比} 的对象",
+                "error_kind": "param",
+                "hint": '例如 {"toy car": 0.31, "diecast car": 0.22}；'
+                        "占比填 0~1 的小数，或 0~100 的百分数（会自动归一）。",
+            }
+        # 有人习惯填 31 表示 31%。两种情况都接受并归一成 0~1，
+        # 否则权重会被放大 100 倍，词重合度直接爆掉。
+        fields["core_keywords"] = {
+            str(k): (float(v) / 100.0 if float(v) > 1 else float(v))
+            for k, v in kws.items()
+        }
+
     res = pool.update_baseline(ctx.tenant_id, **fields)
     if isinstance(res, dict):
         res.setdefault("ok", True)
@@ -476,6 +513,16 @@ CAPABILITIES: tuple[Capability, ...] = (
             _p("sub_category_rank", "子类目 BSR", T_INT, minimum=1),
             _p("rating", "星级", T_FLOAT, minimum=0, maximum=5),
             _p("review_count", "评论数", T_INT, minimum=0),
+            _p(
+                "core_keywords", "核心出单词", T_JSON,
+                help='{"词": 流量占比} 形式，例如 {"toy car": 0.31, "diecast car": 0.22}。'
+                     "分层判断的「流量池」维度靠它算加权词重合度；不填这维度就判不了",
+            ),
+            _p(
+                "category_path", "自家类目路径", T_JSON,
+                help='从根到叶的列表，例如 ["Toys & Games", "Toy Vehicles", "Play Trucks"]。'
+                     "分层判断的「节点」维度只认它",
+            ),
         ),
         handler=set_baseline,
     ),
