@@ -17,11 +17,30 @@ from sqlalchemy.orm import Session
 from app.adapters.sellersprite import SellerSpriteAdapter
 from app.adapters.unified import UnifiedSnapshot
 from app.db import get_session
-from app.domain import diff as diff_mod
 from app.domain.diff import DiffEngine, SignalDraft
-from app.models import Competitor, Decision, MyProduct, SeasonCalendar, Signal, Snapshot
+from app.models import (
+    CollectRun,
+    Competitor,
+    Decision,
+    MyProduct,
+    SeasonCalendar,
+    Signal,
+    Snapshot,
+)
+from app.services import settings_store
 
 logger = logging.getLogger(__name__)
+
+#: 采集触发来源，写进 collect_runs.trigger。
+#: 为什么要区分：定时采集失败是「数据源的问题」，面板手动采集失败是「刚才那个按钮的问题」，
+#: 排查方向完全不同，事后只看一行日志必须能分清。
+TRIGGER_SCHEDULE = "schedule"
+TRIGGER_MANUAL = "manual"
+TRIGGER_PANEL = "panel"
+#: 模型在对话里主动要求采集。与 `manual` 分开是因为两者的失败模式不同：
+#: 人点的采集失败通常是一次网络抖动，模型点的失败可能意味着它判断错了"该不该采"。
+#: 合成一档，健康页就回答不了"是不是模型在乱调工具"。
+TRIGGER_AGENT = "agent"
 
 
 # ============================================================
@@ -53,33 +72,80 @@ class CollectResult:
 # ============================================================
 
 
-def collect_competitor(competitor_id: int) -> CollectResult:
+def collect_competitor(competitor_id: int, trigger: str = TRIGGER_SCHEDULE) -> CollectResult:
     """同步入口，给脚本和 Celery 风格调用用。"""
-    return asyncio.run(acollect_competitor(competitor_id))
+    return asyncio.run(acollect_competitor(competitor_id, trigger=trigger))
 
 
-async def acollect_competitor(competitor_id: int) -> CollectResult:
-    """采集单个竞品。内部自己开会话，不依赖外部事务。"""
+async def acollect_competitor(
+    competitor_id: int, trigger: str = TRIGGER_SCHEDULE
+) -> CollectResult:
+    """采集单个竞品。内部自己开会话，不依赖外部事务。
+
+    每一轮都会在 `collect_runs` 留一行痕迹（成功也留、失败更留）。
+    没有这张表，「哪一轮采集失败了」只能靠猜，而数据健康页的全部价值就在这一问。
+    """
+    started_at = datetime.now()
+
+    # ---- 读元信息 + 开一条采集日志 ----
     # 先把需要的元信息读出来，避免网络请求期间占着会话
     with get_session() as s:
         comp = s.get(Competitor, competitor_id)
         if comp is None:
+            # 竞品本身不存在，日志写了也指不到任何对象，直接返回
             return CollectResult(competitor_id=competitor_id, asin="", ok=False, errors=["竞品不存在"])
         asin = comp.asin
         marketplace = comp.marketplace or "US"
         tier = comp.tier
+        tenant_id = comp.tenant_id
+        my_product_id = comp.my_product_id
         my = s.get(MyProduct, comp.my_product_id)
         my_price = my.current_price if my else None
-        my_asin = my.asin if my else None
         phase = resolve_season_phase(s, my)
+
+        run = CollectRun(
+            tenant_id=tenant_id,
+            competitor_id=competitor_id,
+            asin=asin,
+            started_at=started_at,
+            ok=False,          # 先记失败，跑成功再翻牌。这样「进程被 kill」也会留下失败痕迹。
+            trigger=trigger,
+        )
+        s.add(run)
+        s.flush()
+        run_id = run.id
+
+    # ---- 取阈值（系统行为没有自然人：user_id=None，只走 company → product）----
+    # 取不到就落回默认值，绝不因为「配置读失败」而不采集。
+    thresholds = settings_store.resolve_diff_thresholds(tenant_id, my_product_id)
+    notify_th = settings_store.resolve_notify_thresholds(tenant_id, my_product_id)
 
     # ---- 拉数据（网络，不持锁） ----
     adapter = SellerSpriteAdapter()
-    snap = await adapter.fetch_snapshot(asin, marketplace)
+    try:
+        snap = await adapter.fetch_snapshot(asin, marketplace)
+    except Exception as exc:  # noqa: BLE001
+        # 抛出去之前先落账：否则「采集抛异常」这一轮在库里根本不存在，
+        # 而它恰恰是最需要被看到的一类失败。
+        _finish_run(
+            run_id,
+            started_at=started_at,
+            ok=False,
+            data_quality="failed",
+            errors=[f"{type(exc).__name__}: {exc}"],
+        )
+        raise
 
     if snap.data_quality == "failed":
         logger.warning("采集失败 %s: %s", asin, snap.errors)
         _touch_checked(competitor_id)
+        _finish_run(
+            run_id,
+            started_at=started_at,
+            ok=False,
+            data_quality="failed",
+            errors=snap.errors or ["未取到任何有效字段"],
+        )
         return CollectResult(
             competitor_id=competitor_id,
             asin=asin,
@@ -89,9 +155,13 @@ async def acollect_competitor(competitor_id: int) -> CollectResult:
         )
 
     # ---- 落库 + 比对 ----
+    result: CollectResult
     with get_session() as s:
         comp = s.get(Competitor, competitor_id)
         if comp is None:
+            # 竞品在这两个会话之间被删掉了（极小概率）。此时那条 collect_runs
+            # 会保持 ok=0、finished_at=NULL —— 这正是「这一轮没跑完」的应有形态，
+            # 数据健康页会把它算成一次失败。
             return CollectResult(competitor_id=competitor_id, asin=asin, ok=False, errors=["竞品已被删除"])
 
         prev_row = s.execute(
@@ -106,7 +176,7 @@ async def acollect_competitor(competitor_id: int) -> CollectResult:
 
         if prev_row is None:
             # 第一条快照没有可比对象，只建立基线，不报信号
-            return CollectResult(
+            result = CollectResult(
                 competitor_id=competitor_id,
                 asin=asin,
                 ok=True,
@@ -114,44 +184,62 @@ async def acollect_competitor(competitor_id: int) -> CollectResult:
                 is_first_snapshot=True,
                 errors=snap.errors,
             )
+        else:
+            prev_snap = row_to_unified(prev_row, marketplace)
+            engine = DiffEngine(phase=phase, thresholds=thresholds)
 
-        prev_snap = row_to_unified(prev_row, marketplace)
-        engine = DiffEngine(phase=phase)
+            oos_confirmed = is_oos_confirmed(prev_snap)
+            drafts = engine.compare(
+                prev_snap,
+                snap,
+                tier=tier,
+                my_price=my_price,
+                oos_confirmed=oos_confirmed,
+            )
 
-        oos_confirmed = await _confirm_oos(prev_snap, snap)
-        drafts = engine.compare(
-            prev_snap,
-            snap,
-            tier=tier,
-            my_price=my_price,
-            oos_confirmed=oos_confirmed,
-        )
+            # 信号去重：同一竞品同一类型在冷却窗口内只落一条（窗口来自 notify 组配置）
+            drafts = [
+                d for d in drafts if not _is_cooling_down(s, competitor_id, d, cooldown=notify_th)
+            ]
 
-        # 信号去重：同一竞品同一类型在冷却窗口内只落一条
-        drafts = [d for d in drafts if not _is_cooling_down(s, competitor_id, d)]
+            _save_signals(s, comp.tenant_id, competitor_id, drafts)
 
-        _save_signals(s, comp.tenant_id, competitor_id, drafts)
+            logger.info(
+                "采集 %s | quality=%s | 信号 P0=%d P1=%d P2=%d",
+                asin,
+                snap.data_quality,
+                sum(1 for d in drafts if d.level == "P0"),
+                sum(1 for d in drafts if d.level == "P1"),
+                sum(1 for d in drafts if d.level == "P2"),
+            )
 
-        logger.info(
-            "采集 %s | quality=%s | 信号 P0=%d P1=%d P2=%d",
-            asin,
-            snap.data_quality,
-            sum(1 for d in drafts if d.level == "P0"),
-            sum(1 for d in drafts if d.level == "P1"),
-            sum(1 for d in drafts if d.level == "P2"),
-        )
+            result = CollectResult(
+                competitor_id=competitor_id,
+                asin=asin,
+                ok=True,
+                data_quality=snap.data_quality,
+                signals=drafts,
+                errors=snap.errors,
+            )
 
-        return CollectResult(
-            competitor_id=competitor_id,
-            asin=asin,
-            ok=True,
-            data_quality=snap.data_quality,
-            signals=drafts,
-            errors=snap.errors,
-        )
+    # 日志必须在 with 之外写：SQLite 同一时刻只允许一个写事务，
+    # 在未提交的会话里嵌套开第二个 get_session() 会直接 "database is locked"。
+    # signal_count 取「本次真正落库的信号数」（已过冷却去重），
+    # 否则数据健康页会出现「日志说 5 条、库里只有 1 条」的对不上。
+    _finish_run(
+        run_id,
+        started_at=started_at,
+        ok=result.ok,
+        data_quality=result.data_quality,
+        signal_count=len(result.signals),
+        errors=result.errors or None,
+    )
+    return result
 
 
-async def acollect_competitor_by_asin(tenant_id: str, asin: str) -> dict:
+async def acollect_competitor_by_asin(
+    tenant_id: str, asin: str, trigger: str = TRIGGER_PANEL
+) -> dict:
     """按 ASIN 采集单个竞品，返回 JSON 友好的结构（给 HTTP / 工具层用）。"""
     asin = (asin or "").strip().upper()
     with get_session() as s:
@@ -164,7 +252,7 @@ async def acollect_competitor_by_asin(tenant_id: str, asin: str) -> dict:
             return {"ok": False, "error": f"{asin} 不在池中"}
         cid = comp.id
 
-    res = await acollect_competitor(cid)
+    res = await acollect_competitor(cid, trigger=trigger)
     return {
         "ok": res.ok,
         "asin": res.asin,
@@ -176,8 +264,12 @@ async def acollect_competitor_by_asin(tenant_id: str, asin: str) -> dict:
     }
 
 
-async def collect_all(tenant_id: str) -> list[CollectResult]:
-    """采集该租户下所有 active 竞品。并发 3 个，别把 bridge 打挂。"""
+async def collect_all(tenant_id: str, trigger: str = TRIGGER_SCHEDULE) -> list[CollectResult]:
+    """采集该租户下所有 active 竞品。并发 3 个，别把 bridge 打挂。
+
+    只捞 `active`：所以 `paused`（老板点了「停」）与 `archived` 天然不会被采集，
+    不需要在采集逻辑里写任何判断。
+    """
     with get_session() as s:
         ids = [
             c.id
@@ -194,7 +286,7 @@ async def collect_all(tenant_id: str) -> list[CollectResult]:
     async def _one(cid: int) -> CollectResult:
         async with sem:
             try:
-                return await acollect_competitor(cid)
+                return await acollect_competitor(cid, trigger=trigger)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("采集异常 competitor_id=%s", cid)
                 return CollectResult(
@@ -260,12 +352,37 @@ def _save_signals(s: Session, tenant_id: str, competitor_id: int, drafts: list[S
 # 冷却去重
 # ============================================================
 
-# 同一竞品同一信号类型，多久之内只算一次（防止 15 分钟一轮刷屏）
+# 默认冷却窗口（降级为「默认值来源」：运行时优先用 notify 组配置，见 _is_cooling_down）。
+# 保留常量是为了 NotifyThresholds 的默认值可以被测试逐键锁死。
 COOLDOWN_HOURS = {"P0": 4, "P1": 12, "P2": 48}
 
 
-def _is_cooling_down(s: Session, competitor_id: int, draft: SignalDraft) -> bool:
-    window = COOLDOWN_HOURS.get(draft.level, 24)
+def _cooldown_window(cooldown, level: str) -> int:
+    """取某等级的冷却小时数。cooldown 可为 None / NotifyThresholds / {level: hours}。"""
+    if cooldown is None:
+        return COOLDOWN_HOURS.get(level, 24)
+    if hasattr(cooldown, "cooldown_hours"):
+        return int(cooldown.cooldown_hours(level))
+    return int(dict(cooldown).get(level, COOLDOWN_HOURS.get(level, 24)))
+
+
+def _is_cooling_down(
+    s: Session, competitor_id: int, draft: SignalDraft, cooldown=None
+) -> bool:
+    """同竞品同信号类型在冷却窗口内是否已经报过。
+
+    cooldown 不传就用默认窗口，所以老调用点行为一字不变；
+    传了 `NotifyThresholds` 就按老板配的节奏去重。
+
+    **边界语义：恰好等于窗口长度 → 仍算冷却中（抑制）**，即 `>=`。
+    这是一个"宁可少报一次"的选择：多打扰一次会让人开始忽略推送，
+    少报一次的代价只是这条变化进日报而不是进 P1 预警。
+    试算侧 `simulator._count_after_cooldown` 必须用同一个口径（`<=`），
+    否则试算给的次数会比线上少——而试算的全部意义就是"改之前先看会怎样"。
+    """
+    window = _cooldown_window(cooldown, draft.level)
+    if window <= 0:
+        return False
     since = datetime.now() - timedelta(hours=window)
     exists = s.execute(
         select(Signal.id)
@@ -280,6 +397,43 @@ def _is_cooling_down(s: Session, competitor_id: int, draft: SignalDraft) -> bool
 
 
 # ============================================================
+# 采集日志（collect_runs）
+# ============================================================
+
+
+def _finish_run(
+    run_id: int,
+    *,
+    started_at: datetime,
+    ok: bool,
+    data_quality: Optional[str],
+    signal_count: int = 0,
+    errors: Optional[list] = None,
+) -> None:
+    """收尾一条采集日志。**永不抛异常**。
+
+    为什么吞掉这里的异常：它跑在采集的返回路径上，如果写日志失败反过来
+    把一次成功的采集变成异常，就成了「观测手段打挂了业务」。所以只记 warning。
+    """
+    finished_at = datetime.now()
+    duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+    try:
+        with get_session() as s:
+            run = s.get(CollectRun, run_id)
+            if run is None:
+                return
+            run.finished_at = finished_at
+            run.ok = ok
+            run.data_quality = data_quality
+            run.signal_count = signal_count
+            run.errors = errors
+            # 0 会让「这一轮到底跑没跑」变成歧义（0ms 与没跑分不清），下限取 1
+            run.duration_ms = max(1, duration_ms)
+    except Exception:  # noqa: BLE001
+        logger.warning("写采集日志失败 run_id=%s", run_id, exc_info=True)
+
+
+# ============================================================
 # 辅助
 # ============================================================
 
@@ -291,11 +445,14 @@ def _touch_checked(competitor_id: int) -> None:
             comp.last_checked_at = datetime.now()
 
 
-async def _confirm_oos(prev: UnifiedSnapshot, curr: UnifiedSnapshot) -> bool:
-    """断货二次确认：上一次是否也不在售。
+def is_oos_confirmed(prev: UnifiedSnapshot) -> bool:
+    """断货二次确认：**上一次**的采集结果是否也不在售。
 
     单次采集到 OOS 可能只是数据源抖动，或者 listing 短暂下架。
-    只有在售状态连续两次为负，才按「真断货」处理（P0）。
+    只有在售状态连续两次为负，才按「真断货」处理（措辞上区分「已确认」/「首次发现」）。
+
+    刻意做成同步纯函数：试算（simulator）要在内存里对历史快照跑同一段判定，
+    如果它需要 await，试算就得自己开事件循环，那等于把同一段逻辑写两遍。
     """
     return prev.in_stock is False or (prev.stock_hint or "").upper() == "OOS"
 

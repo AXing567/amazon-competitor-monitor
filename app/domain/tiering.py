@@ -1,21 +1,28 @@
 """步骤 1：四同法则 + 加权词重合度 + S/A/B/C 分层。
 
 这是全系统唯一实现分层算法的地方。Agent、调度器、Web 都调这里的函数。
+
+**阈值不在本文件里决定**：`judge_tier(..., thresholds=TieringThresholds(...))`
+从外面接收阈值。下面这些模块常量已降级为「默认值来源 + 迁移期兼容」，
+运行时不再读它们（读取方变成了 `app/domain/thresholds.py` 的 dataclass 默认值）。
+保留它们是为了两件事：一是 `tests/test_thresholds.py` 用它锁死默认值等价，
+二是不让任何外部 `from app.domain.tiering import KEYWORD_OVERLAP_GATE` 立刻炸掉。
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from app.adapters.unified import TieringResult, UnifiedSnapshot
+from app.domain.thresholds import TieringThresholds
 
-# ---- 阈值常量（集中在顶部，方便调参） ----
+# ---- 默认阈值常量（**降级**：运行时由 TieringThresholds 提供，见 judge_tier） ----
 PRICE_RATIO_MIN = 0.7          # 价格带下限：竞品价 / 自家价
 PRICE_RATIO_MAX = 1.4          # 价格带上限
 KEYWORD_OVERLAP_GATE = 0.40    # 进池门槛：低于此值直接判无关
 OVERLAP_S = 0.60               # S 级门槛
 OVERLAP_A = 0.40               # A 级门槛
 OVERLAP_B = 0.20               # B 级门槛
-CORE_COVERAGE = 0.80           # 核心词池覆盖的流量比例
+CORE_COVERAGE = 0.80           # 核心词池覆盖的流量比例（当前未被消费，仍要进 SPEC）
 
 
 # ============================================================
@@ -68,24 +75,29 @@ def judge_tier(
     my_daily_units: Optional[float],
     comp: UnifiedSnapshot,
     functional_match: Optional[bool] = None,
+    thresholds: TieringThresholds | None = None,
 ) -> TieringResult:
     """跑完整四同法则，输出分层结果与判定依据。
 
     functional_match 无法自动判定（涉及物理形态判断），默认 None 表示"待人工确认"，
     此时不因此拒绝入池，但在 tier_reasons 里标注。
+
+    thresholds 不传就用默认值：调用方（pool / scheduler / 工具层）不用改一行，
+    而「按老板自己的门槛判」只需要多传一个参数。
     """
+    th = thresholds or TieringThresholds()
     res = TieringResult()
 
     # ---- 同 1：价格带 ----
     res.price_ratio = calc_price_ratio(my_price, comp.net_price or comp.price)
     price_ok = (
         res.price_ratio is not None
-        and PRICE_RATIO_MIN <= res.price_ratio <= PRICE_RATIO_MAX
+        and th.price_ratio_min <= res.price_ratio <= th.price_ratio_max
     )
 
     # ---- 同 2：流量池 ----
     res.keyword_overlap = calc_keyword_overlap(my_core_keywords, comp.keywords)
-    keyword_ok = res.keyword_overlap is not None and res.keyword_overlap >= KEYWORD_OVERLAP_GATE
+    keyword_ok = res.keyword_overlap is not None and res.keyword_overlap >= th.keyword_overlap_gate
 
     # ---- 同 3：功能形态（自动判不了，留给人工） ----
     res.functional_match = functional_match
@@ -109,10 +121,26 @@ def judge_tier(
     }
 
     # ---- 硬门槛：流量池或节点，二选一必须过 ----
+    #
+    # TODO(下一轮 · 数据模型): 补 `snapshots.keywords`(JSON) 与 `MyProduct.category_path`。
+    #   缺的是什么：竞品流量词（keywords）与自家类目路径（category_path）。
+    #   为什么缺：卖家精灵的关键词是慢通道（单次 5~15s、有配额），采集时虽然取到过，
+    #     但没有落库；第二天 `collector.row_to_unified()` 还原快照时 keywords 就是空的，
+    #     而 job_pool_maintenance 传的 my_category_path 恒为 None。
+    #   补齐后：节点维度可判，decidable_dims 常态为 3，insufficient 自然不再出现。
+    #   注意：下面这段兜底不要因此删除——它是「将来再加维度」时的护栏，不是临时补丁。
+    res.decidable_dims = sum(
+        1 for dim in (res.price_ratio, res.keyword_overlap, res.node_match) if dim is not None
+    )
+    # 少于 2 个维度可判定 = 结论不足以下发。
+    # 为什么不按「缺的当 False」处理：那会把「不知道」写成「不合格」，
+    # 而这类错误没有任何报错，只会在下游表现为整池降级。
+    res.insufficient = res.decidable_dims < 2
+
     if not (keyword_ok or (node_ok and price_ok)):
         res.passed = False
         res.tier = "C"
-        res.reject_reason = _reject_reason(price_ok, keyword_ok, res)
+        res.reject_reason = _reject_reason(price_ok, keyword_ok, res, th)
         return res
 
     res.passed = True
@@ -122,6 +150,7 @@ def judge_tier(
         node_ok=node_ok,
         comp=comp,
         my_daily_units=my_daily_units,
+        th=th,
     )
     return res
 
@@ -138,6 +167,7 @@ def _decide_letter_tier(
     node_ok: bool,
     comp: UnifiedSnapshot,
     my_daily_units: Optional[float],
+    th: TieringThresholds,
 ) -> str:
     """在通过入池门槛后，决定 S/A/B/C。"""
     # ---- A 级：新品黑马（上架 <90 天且销量规模可观） ----
@@ -148,15 +178,15 @@ def _decide_letter_tier(
         return "B"
 
     # ---- S 级：高重合 + 价格带重叠 + 节点一致 + 体量咬合 ----
-    if overlap >= OVERLAP_S and price_ok and node_ok and _volume_close(comp, my_daily_units):
+    if overlap >= th.overlap_s and price_ok and node_ok and _volume_close(comp, my_daily_units):
         return "S"
 
     # ---- A 级：中重度重合 ----
-    if overlap >= OVERLAP_A:
+    if overlap >= th.overlap_a:
         return "A"
 
     # ---- B 级：轻度重合，相邻战场 ----
-    if overlap >= OVERLAP_B:
+    if overlap >= th.overlap_b:
         return "B"
 
     return "C"
@@ -202,15 +232,27 @@ def _check_node_match(my_path: list[str] | None, comp_path: list[str] | None) ->
     return my_path[-1].strip().lower() == comp_path[-1].strip().lower()
 
 
-def _reject_reason(price_ok: bool, keyword_ok: bool, res: TieringResult) -> str:
+def _reject_reason(
+    price_ok: bool, keyword_ok: bool, res: TieringResult, th: TieringThresholds
+) -> str:
+    """拒绝理由。**文案里的数字必须来自 th，不许写死**。
+
+    写死一个 40% 的后果：老板把门槛调成 90% 后，面板上仍显示
+    「词重合度 80% 低于 40% 门槛」——一句自相矛盾的废话，比没有理由更糟。
+    """
     parts = []
     if res.keyword_overlap is None:
         parts.append("缺少流量词数据，无法计算重合度")
     elif not keyword_ok:
-        parts.append(f"词重合度 {res.keyword_overlap:.1%} 低于 {KEYWORD_OVERLAP_GATE:.0%} 门槛")
+        parts.append(
+            f"词重合度 {res.keyword_overlap:.1%} 低于 {th.keyword_overlap_gate:.0%} 门槛"
+        )
     if not price_ok:
         if res.price_ratio is None:
             parts.append("缺少价格数据")
         else:
-            parts.append(f"价格比 {res.price_ratio:.2f} 超出 {PRICE_RATIO_MIN}~{PRICE_RATIO_MAX} 价格带")
+            parts.append(
+                f"价格比 {res.price_ratio:.2f} 超出 "
+                f"{th.price_ratio_min}~{th.price_ratio_max} 价格带"
+            )
     return "；".join(parts) or "未通过战场判定"

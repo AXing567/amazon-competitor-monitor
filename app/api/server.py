@@ -7,6 +7,20 @@
 
 为什么合成一个进程：单租户自用，运维成本越低越好。
 真到了要多实例的规模，再把调度拆出去（`SCHEDULER_ENABLED=false` 即可）。
+
+## 路由分工（T04 之后）
+
+| 前缀 | 归属 | 说明 |
+|---|---|---|
+| `/api/panel/*` | T05 面板 | 五个视图的聚合端点 |
+| `/api/config/*` | `app/api/routes/config.py` | 阈值配置 7 个端点 |
+| `/api/cap/*` | `app/api/routes/capabilities.py` | 通用能力分发（33 个能力共用 3 个端点） |
+| `/api/users` `/api/bindings` | `app/api/routes/identity.py` | 用户 / 身份 / 绑定 |
+| `/api/brief` `/api/competitors` ... | 本文件 | **老端点，保留不动**：外部脚本还在用 |
+
+老端点为什么留着：它们是"单点直调"的旧形态，功能与能力层重复但不冲突。
+删掉会让已经在跑的 curl 脚本断掉，而收益只是少 40 行代码——不值。
+新代码一律走能力层，老端点标在这里当作技术债清单。
 """
 from __future__ import annotations
 
@@ -20,6 +34,7 @@ from pydantic import BaseModel
 
 from app.agent import llm
 from app.api.dashboard import DASHBOARD_HTML
+from app.api.routes import api_router
 from app.channels.feishu import (
     decrypt_event,
     get_feishu,
@@ -35,6 +50,7 @@ from app.services.scheduler import (
     start_scheduler,
     stop_scheduler,
 )
+from app.web import render_panel
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -71,6 +87,10 @@ app = FastAPI(
     description="亚马逊竞品监控 · 采集/分层/预警/Agent 对话",
     lifespan=lifespan,
 )
+
+# T04：L4 能力层的 REST 出口。挂在这里而不是散落在本文件，
+# 是为了让「有哪些端点」这件事只有一个地方能回答。
+app.include_router(api_router)
 
 
 # ============================================================
@@ -185,7 +205,61 @@ async def api_chat(body: ChatBody) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
+    """面板入口（五个视图，单文件 HTML，零外链）。
+
+    刻意**不跳转**到 `/panel`：请求 `/` 拿到 200 的一个页面，是运维最想看到的信号。
+    数据源全挂的时候这一页也能打开——它只依赖 `/api/panel/*`，而那些端点
+    在数据源熔断时返回 200 + `ok:false`，于是页面显示的是错误卡片而不是白屏。
+    """
+    return render_panel()
+
+
+@app.get("/panel", response_class=HTMLResponse)
+def panel() -> str:
+    """与 `/` 同一个页面，只是给书签一个语义明确的地址。"""
+    return render_panel()
+
+
+@app.get("/legacy", response_class=HTMLResponse)
+def legacy() -> str:
+    """旧只读看板。保留到新面板五视图全部验收通过为止。"""
     return DASHBOARD_HTML
+
+
+def _panel_placeholder() -> str:
+    """T04 时期的占位页，现已不再被路由使用。
+
+    留着的原因：`/health` 的排障说明与 README 的早期截图引用过它，
+    删掉会让"这条链接为什么 404"变成一次考古。下一轮清技术债时一起删。
+    """
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>竞品监控 · 面板</title>
+  <style>
+    body {{ font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+            margin: 0; padding: 48px 24px; background: #0f1115; color: #e6e8ee; }}
+    .card {{ max-width: 720px; margin: 0 auto; background: #171a21; border-radius: 12px;
+             padding: 28px 32px; border: 1px solid #262b36; }}
+    h1 {{ font-size: 20px; margin: 0 0 8px; }}
+    p {{ color: #9aa3b2; line-height: 1.7; margin: 8px 0; }}
+    code {{ background: #0f1115; padding: 2px 6px; border-radius: 4px; color: #8fd0ff; }}
+    a {{ color: #6cb6ff; }}
+    ul {{ color: #9aa3b2; line-height: 1.9; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>面板占位页</h1>
+    <p>五视图面板（看板 / 阈值 / 竞品池 / 动作记录 / 数据健康）已经上线，见
+       <a href="/panel">/panel</a>。</p>
+    <p>旧只读看板：<a href="/legacy">/legacy</a> · 接口文档：<a href="/docs">/docs</a></p>
+    <p>当前租户：<code>{settings.tenant_id}</code></p>
+  </div>
+</body>
+</html>"""
 
 
 # ============================================================

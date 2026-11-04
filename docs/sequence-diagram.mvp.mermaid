@@ -1,0 +1,68 @@
+%% MVP 增量设计 · 关键时序（对应 docs/DESIGN-mvp.md 第五节）
+%% 链路：面板改阈值 → 试算 → 保存 → 生效 → 回滚
+sequenceDiagram
+    autonumber
+    actor U as 用户（浏览器）
+    participant P as L5B 面板<br/>app/web/views/config.py
+    participant R as L4 路由<br/>app/api/routes/config.py
+    participant C as L4 能力层<br/>app/capabilities
+    participant S as L3 编排<br/>simulator / settings_store
+    participant D as L2 纯函数<br/>diff.DiffEngine / thresholds
+    participant DB as L0 SQLite
+
+    Note over U,DB: 第 0 步：表单由 schema 驱动，前端不认识任何字段名
+    U->>P: 打开「阈值配置」
+    P->>R: GET /api/config/thresholds/schema
+    R->>C: call("get_threshold_schema", ctx=panel)
+    C->>D: THRESHOLD_SPEC（纯数据，无 I/O）
+    D-->>C: diff / tiering / notify 三组定义
+    C-->>R: {"ok":true,"groups":[...]}
+    R-->>P: JSON
+    P-->>U: 动态渲染输入框 + 「最近 N 天」选择器
+
+    Note over U,DB: 第 1 步：试算（dry-run，绝不落库）
+    U->>P: price_p0_pct 0.03 → 0.10，点「试算」
+    P->>R: POST /api/config/thresholds/simulate
+    R->>C: call("simulate_thresholds", ctx=panel)
+    C->>C: 按 THRESHOLD_SPEC 校验类型与范围
+    C->>S: simulator.simulate_diff_thresholds(values, days=7)
+    S->>DB: resolve(company → user → product) 得当前生效值
+    DB-->>S: diff: price_p0_pct=0.03 ...
+    S->>S: merge(当前生效, 候选覆盖) → candidate
+    S->>DB: 读窗口内 snapshots（按 competitor, captured_at 升序）
+    DB-->>S: N 条快照
+    loop 每对相邻快照
+        S->>D: DiffEngine(phase, thresholds=DiffThresholds.from_dict(candidate))
+        D-->>S: list[SignalDraft]（与生产完全同一段代码）
+    end
+    S->>D: 再用「当前生效」阈值跑一遍 → current
+    S->>S: 内存模拟冷却去重（P0 4h / P1 12h / P2 48h）
+    S-->>C: window / current / candidate / delta / after_cooldown / by_competitor
+    C-->>R: {"ok":true,...}
+    R-->>P: JSON
+    P-->>U: 按新标准 P0 从 12 条降到 3 条
+
+    Note over U,DB: 第 2 步：保存（写库 + 留痕）
+    U->>P: 点「保存」
+    P->>R: POST /api/config/thresholds
+    R->>C: call("save_thresholds", ctx=panel)
+    C->>S: settings_store.save(...)
+    S->>D: 校验键在 SPEC 内、类型与范围合法
+    S->>DB: upsert threshold_configs（version = old + 1，只存稀疏覆盖值）
+    S->>DB: append threshold_versions（action = "update"）
+    S-->>C: {"ok":true,"version":4}
+    C-->>R: 同上
+    R-->>P: 同上
+    P-->>U: 已保存 v4，下一轮采集起按新标准报警
+
+    Note over S,DB: 第 3 步：生效（下一次采集时读取，L2 永远被动接收）
+    S->>DB: （采集时）resolve_diff_thresholds(tenant, my_product_id)
+    DB-->>S: 合并后的 Thresholds 对象
+    S->>D: DiffEngine(phase, thresholds=th).compare(prev, curr)
+
+    Note over U,DB: 第 4 步：回滚（追加式，不覆盖历史）
+    U->>R: POST /api/config/thresholds/rollback {version:2}
+    R->>C: call("rollback_thresholds")
+    C->>S: 读 v2 的 values → 走正常保存流程
+    S->>DB: upsert（version = max + 1）+ append（action = "rollback"）
+    S-->>U: {"ok":true,"new_version":5}

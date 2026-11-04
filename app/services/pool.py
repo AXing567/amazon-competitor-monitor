@@ -20,6 +20,7 @@ from app.db import get_session
 from app.domain import baseline as baseline_mod
 from app.domain.tiering import judge_tier
 from app.models import Competitor, MyProduct, Signal, Snapshot
+from app.services import settings_store
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,13 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
             select(MyProduct).where(MyProduct.tenant_id == tenant_id).limit(1)
         ).scalar_one_or_none()
         if my is None:
-            my = MyProduct(tenant_id=tenant_id, marketplace="US")
+            # 必须带上本次传入的 asin：`my_products.asin` 是 NOT NULL，
+            # 先建空行再 setattr 会在 flush 时撞 IntegrityError。
+            # 这个 bug 只在"租户还没有自家产品"时出现（即在干净库上跑 demo/首次配置），
+            # 有数据的库永远复现不出来——所以修在结构上，而不是加 try/except。
+            my = MyProduct(
+                tenant_id=tenant_id, asin=str(fields.get("asin") or ""), marketplace="US"
+            )
             s.add(my)
             s.flush()
 
@@ -209,6 +216,9 @@ def add_competitor(
         }
 
     # ---- 跑四同法则 ----
+    # 阈值必须从配置读，否则「面板改了词重合门槛、实际入池还用老标准」——
+    # 试算与生产不一致，正是最伤信任的那类 bug。
+    # 只走 company + product 两层：分层是**产品属性**，不是个人偏好（与采集同理）。
     res = judge_tier(
         my_price=my_price,
         my_core_keywords=my_keywords,
@@ -216,9 +226,13 @@ def add_competitor(
         my_daily_units=my_daily,
         comp=snap,
         functional_match=functional_match,
+        thresholds=settings_store.resolve_tiering_thresholds(tenant_id, my_id),
     )
 
-    if not res.passed and not force:
+    # 证据不足（keywords 未落库 / 类目路径缺失）时**不拒**：
+    # 拿不到证据 ≠ 证据表明不是竞品。放进来标成 unknown（待判定），
+    # 等数据补齐后由周维护正常改判；拒之门外则永远没有补数据的机会。
+    if not res.passed and not force and not res.insufficient:
         return {
             "ok": False,
             "error": "未通过四同法则，不放进池子",
@@ -226,11 +240,14 @@ def add_competitor(
             "price_ratio": res.price_ratio,
             "keyword_overlap": res.keyword_overlap,
             "node_match": res.node_match,
+            "decidable_dims": res.decidable_dims,
             "hint": "如果你确信它是竞品，可以 force=true 强制加入，标记为观察级（C）",
             "snapshot": _brief_snapshot(snap),
         }
 
-    tier = res.tier if res.passed else "C"
+    # tier 取值 S/A/B/C/unknown。unknown = 待判定（缺数据），**不是不合格**。
+    # 面板必须显示成「待判定」并说明缺什么，不许落到 C 那一档去显示。
+    tier = res.effective_tier
 
     # ---- 写库 ----
     with get_session() as s:
@@ -283,6 +300,16 @@ def add_competitor(
         )
         comp_id = comp.id
 
+    # 分层理由落库成绑定 basis（谁认为这个竞品和自家哪个产品同战场）。
+    # 失败只记日志：绑定是增强，不该让「加竞品」这件事回滚。
+    try:
+        from app.services import binding as binding_mod
+        binding_mod.upsert_from_judgment(tenant_id=tenant_id, competitor_id=comp_id,
+                                         my_product_id=my_id, tier=tier,
+                                         tier_reasons=res.tier_reasons)
+    except Exception:  # noqa: BLE001
+        logger.warning("写入对标绑定失败 competitor_id=%s", comp_id, exc_info=True)
+
     return {
         "ok": True,
         "competitor_id": comp_id,
@@ -301,12 +328,22 @@ def add_competitor(
     }
 
 
-def list_competitors(tenant_id: Optional[str], tier: Optional[str] = None) -> list[dict]:
+def list_competitors(
+    tenant_id: Optional[str],
+    tier: Optional[str] = None,
+    include_archived: bool = False,
+) -> list[dict]:
+    """池子清单。默认不含归档（归档 = 不再盯，日常看不见）。
+
+    `include_archived=True` 是给「竞品池管理」那一屏用的：归档的人要能看见
+    "它去哪了"并能恢复。默认关掉的原因同 `paused` 的注释——日常列表里堆着
+    已经不盯的竞品，会让人误判"我还在盯这么多"。
+    """
     tenant_id = tenant_id or settings.tenant_id
     with get_session() as s:
-        stmt = select(Competitor).where(
-            Competitor.tenant_id == tenant_id, Competitor.status != "archived"
-        )
+        stmt = select(Competitor).where(Competitor.tenant_id == tenant_id)
+        if not include_archived:
+            stmt = stmt.where(Competitor.status != "archived")
         if tier:
             stmt = stmt.where(Competitor.tier == tier.upper())
         comps = list(s.execute(stmt.order_by(Competitor.tier, Competitor.asin)).scalars())
@@ -334,6 +371,14 @@ def list_competitors(tenant_id: Optional[str], tier: Optional[str] = None) -> li
                     "in_stock": last.in_stock if last else None,
                     "price_ratio": c.price_ratio,
                     "keyword_overlap": c.keyword_overlap,
+                    # 面板的「判定理由」要用：四同法则逐项结论 + 判定时间。
+                    # 列表里带上，比让面板对 8 个竞品各调一次 get_competitor_detail（N+1）好。
+                    "tier_reasons": c.tier_reasons,
+                    "node_match": c.node_match,
+                    "functional_match": c.functional_match,
+                    "tier_updated_at": (
+                        c.tier_updated_at.isoformat() if c.tier_updated_at else None
+                    ),
                     "last_checked_at": c.last_checked_at.isoformat() if c.last_checked_at else None,
                     "data_quality": last.data_quality if last else "none",
                 }
@@ -425,6 +470,33 @@ def archive_competitor(tenant_id: Optional[str], asin: str, reason: str = "") ->
             return {"ok": False, "error": "不在池中"}
         comp.status = "archived"
         return {"ok": True, "asin": comp.asin, "note": reason or "已归档，不再采集但仍保留历史"}
+
+
+# 「停」= paused：停止采集、保留历史、面板可见但灰显。
+# 不用新代码去实现「不采集」——collect_all 只捞 status == "active"，
+# 所以 paused 天然被跳过。这就是选 paused 而不是加一个 is_enabled 列的理由。
+VALID_STATUSES = ("active", "paused", "archived")
+_STATUS_EFFECT = {
+    "active": "恢复采集", "paused": "已停止采集，历史保留", "archived": "已归档，不再出现在列表",
+}
+
+
+def set_competitor_status(tenant_id: Optional[str], asin: str, status: str) -> dict:
+    """改竞品状态：active / paused / archived。"""
+    tenant_id = tenant_id or settings.tenant_id
+    status = (status or "").strip().lower()
+    if status not in VALID_STATUSES:
+        return {"ok": False, "error": f"status 只能是 {'/'.join(VALID_STATUSES)}，收到 {status!r}"}
+    with get_session() as s:
+        comp = s.execute(
+            select(Competitor).where(
+                Competitor.tenant_id == tenant_id, Competitor.asin == (asin or "").strip().upper()
+            )
+        ).scalar_one_or_none()
+        if comp is None:
+            return {"ok": False, "error": f"{asin} 不在池中"}
+        comp.status = status
+        return {"ok": True, "asin": comp.asin, "status": status, "effect": _STATUS_EFFECT[status]}
 
 
 # ============================================================

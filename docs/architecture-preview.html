@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>竞品监控 · 预期架构 v5</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#f4f5f7;color:#111827;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:52px 30px 86px}
+.hd{border-bottom:1px solid #e2e4e8;padding-bottom:24px;margin-bottom:32px}
+.hd h1{font-size:26px;font-weight:600;letter-spacing:-.02em;margin-bottom:9px}
+.hd .sub{color:#6b7280;font-size:14px;max-width:780px}
+.hd .sub b{color:#111827;font-weight:600}
+.tags{margin-top:14px;display:flex;gap:7px;flex-wrap:wrap}
+.tag{font-size:12px;padding:3px 10px;border-radius:999px;background:#eef2ff;color:#4338ca;border:1px solid #e0e7ff}
+.tag.g{background:#f0fdf4;color:#15803d;border-color:#dcfce7}
+.tag.o{background:#fff7ed;color:#c2410c;border-color:#ffedd5}
+.tag.r{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
+h2.sec{font-size:16px;font-weight:600;margin:46px 0 8px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+h2.sec span{font-size:12.5px;font-weight:400;color:#9ca3af}
+.hint{font-size:13px;color:#6b7280;margin-bottom:16px}
+table{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb}
+thead th{background:#f9fafb;font-weight:600;font-size:12px;color:#4b5563;text-align:left;padding:10px 14px;border-bottom:1px solid #e5e7eb;white-space:nowrap}
+tbody td{padding:10px 14px;border-bottom:1px solid #f3f4f6;color:#374151;vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.lb{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--c) 12%,#fff);color:var(--c);border:1px solid color-mix(in srgb,var(--c) 25%,#fff);white-space:nowrap}
+.stack{display:flex;flex-direction:column}
+.layer{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px 18px 16px 22px;display:grid;grid-template-columns:190px 1fr;gap:22px;position:relative;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.layer::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:4px;border-radius:0 4px 4px 0;background:var(--c)}
+.lno{font-size:11px;font-weight:600;letter-spacing:.1em;color:var(--c);margin-bottom:2px}
+.lname{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.lrole{font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5}
+.lwhy{margin-top:10px;font-size:11px;color:#6b7280;background:#f9fafb;border-radius:7px;padding:5px 8px;line-height:1.45}
+.lwhy b{color:#374151;font-weight:600}
+.mods{display:flex;flex-direction:column;gap:12px}
+.subh{font-size:11.5px;color:#6b7280;margin-bottom:7px;display:flex;align-items:center;gap:7px;font-weight:500}
+.badge{font-size:10px;font-weight:600;background:#eef2ff;color:#4338ca;padding:1px 6px;border-radius:5px;letter-spacing:.04em}
+.subg{display:flex;flex-wrap:wrap;gap:8px}
+.mod{flex:1 1 196px;max-width:258px;background:#fafbfc;border:1px solid #edeff2;border-radius:9px;padding:8px 11px 9px;position:relative}
+.mod b{display:block;font-size:12.5px;font-weight:600;margin-bottom:2px}
+.mod em{font-style:normal;font-size:11.5px;color:#6b7280;line-height:1.45;display:block}
+.mod i{position:absolute;top:-7px;right:8px;font-style:normal;font-size:9.5px;padding:0 5px;border-radius:999px;line-height:14px}
+.mod.todo{background:#fff;border:1px dashed #cfd6de}
+.mod.todo i{background:#fff7ed;color:#c2410c;border:1px solid #fed7aa}
+.mod.core{background:#f7f9ff;border-color:#dbe3f7}
+.mod.new{background:#f2fbf6;border-color:#c7efd8}
+.mod.new i{background:#dcfce7;color:#15803d;border:1px solid #bbf7d0}
+.conn{height:26px;display:flex;align-items:center;justify-content:center;color:#c3c9d2;font-size:12px}
+.axis{height:28px;display:flex;align-items:center;justify-content:flex-start;padding-left:104px;color:#b6bcc6;font-size:11px}
+.note{background:#fff;border:1px solid #e5e7eb;border-left:3px solid #2563eb;border-radius:0 12px 12px 0;padding:15px 19px;font-size:13px;color:#374151;line-height:1.75;margin-top:20px}
+.note b{color:#111827}
+.note.warn{border-left-color:#d97706}
+.note.ok{border-left-color:#059669}
+.note.red{border-left-color:#dc2626}
+.flow{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:6px 20px;overflow:hidden}
+.step{display:grid;grid-template-columns:26px 92px 1fr;gap:14px;padding:13px 0;border-bottom:1px solid #f3f4f6;align-items:start}
+.step:last-child{border-bottom:none}
+.sn{width:22px;height:22px;border-radius:50%;background:#f3f4f6;color:#6b7280;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.step.key .sn{background:#111827;color:#fff}
+.sd{font-size:12.5px;color:#4b5563;line-height:1.65}
+.sd b{color:#111827;font-weight:600;display:block;margin-bottom:1px;font-size:13px}
+.sd code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;background:#f3f4f6;padding:1px 5px;border-radius:4px;color:#374151}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:15px 17px}
+.card h3{font-size:13px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:7px}
+.card h3 s{width:7px;height:7px;border-radius:50%;display:inline-block;text-decoration:none;flex:none}
+.card p{font-size:12px;color:#6b7280;line-height:1.65}
+.card p b{color:#374151}
+footer{margin-top:50px;padding-top:20px;border-top:1px solid #e2e4e8;font-size:12px;color:#9ca3af;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+@media(max-width:880px){.wrap{padding:34px 16px 56px}.layer{grid-template-columns:1fr;gap:12px}.grid2{grid-template-columns:1fr}.axis{padding-left:0}.step{grid-template-columns:26px 1fr}.step .sc{grid-column:2}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="hd">
+  <h1>Amazon 竞品监控 · 预期架构</h1>
+  <p class="sub">层按「变化原因」分，模块按「被几条用例穿过」定。<b>规则统一、数据各管、双数据源</b>——这是 v4 相对上一版的三个新前提。</p>
+  <div class="tags">
+    <span class="tag">v5</span>
+    <span class="tag o">10 人共用，池子各管</span>
+    <span class="tag g">新增：对标绑定表 · 快慢双通道</span>
+    <span class="tag r">新增：采集配额成为硬约束</span>
+  </div>
+</div>
+
+<div class="note warn" style="margin-top:0;margin-bottom:32px">
+<b>先纠正一个说法：这不是「多租户」。</b><br>
+多租户要管注册、计费、租户级隔离、自助开通——你一样都不需要。你的真实形态是
+<b>一套规则 + 十份数据</b>：判断逻辑由业务人员统一制定（所以共享），盯哪些产品各管各的（所以分人）。<br>
+这个区分很值钱——它意味着<b>只需要改四处</b>，不需要把数据层推倒重来。
+</div>
+
+<h2 class="sec">一、10 个人改变了四件事 <span>不是加个 user 表就完事</span></h2>
+
+<table>
+<thead><tr><th style="width:132px">要改的</th><th style="width:86px">落点</th><th>为什么</th></tr></thead>
+<tbody>
+<tr>
+  <td><b>数据要有归属</b></td>
+  <td><span class="lb" style="--c:#475569">L0</span></td>
+  <td>每个竞品记下「谁盯的」。但<b>关注关系要单独一张表</b>——张三盯的对手，李四可能也想看。一份数据两种用法，别做成私有的。</td>
+</tr>
+<tr>
+  <td><b>告警要按人路由</b></td>
+  <td><span class="lb" style="--c:#0891b2">L3</span></td>
+  <td>最容易漏、后果最严重的一处。见下方红框。</td>
+</tr>
+<tr>
+  <td><b>规则要分作用域</b></td>
+  <td><span class="lb" style="--c:#7c3aed">L4</span> <span class="lb" style="--c:#475569">L0</span></td>
+  <td>既然可能一人一套阈值，那配置就要有作用域：<b>公司默认 → 个人覆盖 → 产品覆盖</b>。权限也跟着变成「能改自己的，不能改别人的和公司默认的」。</td>
+</tr>
+<tr>
+  <td><b>采集要有配额</b></td>
+  <td><span class="lb" style="--c:#0891b2">L3</span></td>
+  <td>卖家精灵额度是<b>全公司共享</b>的。张三加 50 个竞品，会把李四的采集挤掉。这不是性能问题，是分配问题。</td>
+</tr>
+</tbody>
+</table>
+
+<div class="note red">
+<b>告警路由：不做，系统一周内就会被关掉。</b><br>
+十个人各盯各的，如果每条信号都推给全员，张三每天会收到十倍于他关心的噪音。人的反应不是「忍一忍」，是<b>把群设成免打扰</b>——然后整套系统就死了。<br>
+正确做法：信号产生后查「谁关注这个竞品」，<b>只推给这些人</b>。这一查在 L3 告警编排里，不在 L5。
+</div>
+
+<h2 class="sec">二、先算一笔账 <span>十个人到底能盯多少个</span></h2>
+<p class="hint">这不是性能优化题，是产品形态题——它决定你承诺给同事的是「实时监控」还是「每两小时一次」。</p>
+
+<table>
+<thead><tr><th style="width:210px">项</th><th style="width:200px">取值</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>单竞品一轮采集</td><td class="mono">5 接口 × ~3 秒 ≈ 15 秒</td><td>bridge 限流 2~4 秒/请求，串行下的真实耗时</td></tr>
+<tr><td>100 个竞品一轮</td><td class="mono">≈ 25 分钟</td><td>10 人 × 每人 10 个。<b>总数才是关键，不是人数</b></td></tr>
+<tr><td>每 4 小时一轮</td><td class="mono">≈ 2.5 小时/天</td><td>安全区</td></tr>
+<tr><td>每 1 小时一轮</td><td class="mono">≈ 25 小时/天</td><td><b>跑不完</b>。加并发会被风控</td></tr>
+</tbody>
+</table>
+
+<div class="note">
+<b>结论：100 个竞品的采集频率上限，大概在两小时一轮。</b>想让某几个对手更快（主战场那几个），就得让其他人的慢下来——这正是「配额」必须存在的原因。<br>
+还能省两刀：<br>
+① <code>monitor-summary</code> 把 5 个请求合成 1 个，单竞品 15 秒 → 3 秒。<br>
+② <b>慢通道拆出去</b>：关键词、流量词、评论增速这些按天变的数据，不该跟着价格一起每 2 小时轮询——否则八成请求拿回来的是旧数据，白烧额度还招风控。<br>
+<b>但有个前提，别拍脑袋分层：</b>卖家精灵每个接口到底多久刷一次，现在没人知道。压测第一件事就是记下「同一 ASIN 隔 1h / 4h / 12h 各拉一次，哪几个字段真的变了」。<b>先有这张表，快慢通道才拆得准。</b>
+</div>
+
+<h2 class="sec">三、一条变化怎么触发提醒 <span>跨 5 层，8 步</span></h2>
+<p class="hint">以「对手降价 5%，超过 3% 阈值，且这个竞品是张三在盯」为例。</p>
+
+<div class="flow">
+  <div class="step"><div class="sn">1</div><div class="sc"><span class="lb" style="--c:#0891b2">L3 编排</span></div>
+    <div class="sd"><b>到点了</b>巡检编排从 L0 取本轮要盯的竞品。这一步还要看<b>配额</b>：谁的名额用满了，跳过。</div></div>
+
+  <div class="step key"><div class="sn">2</div><div class="sc"><span class="lb" style="--c:#0891b2">L3 编排</span></div>
+    <div class="sd"><b>把阈值当参数读出来往下传</b>管理员在面板上改的数字存在 L0，由编排层取出，作为入参交给判断函数。<br><span style="color:#9ca3af">不让 L2 自己读库：它必须是无状态纯函数，读了库就不能单独测试、不能重放历史。</span></div></div>
+
+  <div class="step"><div class="sn">3</div><div class="sc"><span class="lb" style="--c:#059669">L1 取数</span></div>
+    <div class="sd"><b>拉最新快照</b>合成 UnifiedSnapshot 并判质量：<code>complete</code> / <code>partial</code> / <code>failed</code>。</div></div>
+
+  <div class="step"><div class="sn">4</div><div class="sc"><span class="lb" style="--c:#475569">L0 存储</span></div>
+    <div class="sd"><b>落库，取回上一条快照</b>新的写进去，上一条读出来，两者一起往下走。</div></div>
+
+  <div class="step key"><div class="sn">5</div><div class="sc"><span class="lb" style="--c:#d97706">L2 变化识别</span></div>
+    <div class="sd"><b>规则在这里命中</b><code>compare(上次, 本次, 阈值)</code> → 降价 5% 超过 3% → 产出 <code>Signal(P0, price_drop)</code>。<br><span style="color:#9ca3af">质量 failed 时整段跳过：没拿到可信数据，绝不产生信号。</span></div></div>
+
+  <div class="step key"><div class="sn">6</div><div class="sc"><span class="lb" style="--c:#0891b2">L3 告警编排</span></div>
+    <div class="sd"><b>查谁该收 + 查推过没</b>先查关注关系：这个竞品谁在盯 → 张三。再查冷却：4 小时内给张三推过这条没。<br><span style="color:#9ca3af">两个查询都需要状态，所以都在 L3。L2 不许碰状态。</span></div></div>
+
+  <div class="step"><div class="sn">7</div><div class="sc"><span class="lb" style="--c:#2563eb">L5 推送</span></div>
+    <div class="sd"><b>渲染成卡片，只发给张三</b>结论 → 卡片文案 → 飞书 API。不是群发，是按人。</div></div>
+
+  <div class="step"><div class="sn">8</div><div class="sc"><span class="lb" style="--c:#475569">L0 回写</span></div>
+    <div class="sd"><b>记一笔已推送</b>下次冷却判断靠它。缺了这步，同一条信号会反复推。</div></div>
+</div>
+
+<h2 class="sec">四、分层总览 <span>绿色 = v4 新增，虚线 = 待建</span></h2>
+
+<div class="stack">
+
+  <div class="layer" style="--c:#2563eb">
+    <div class="lmeta"><div class="lno">L5</div><div class="lname">交互层</div>
+      <div class="lrole">人怎么用系统。两个前端，一推一拉。</div>
+      <div class="lwhy">变化原因<br><b>换渠道 / 改界面</b></div></div>
+    <div class="mods">
+      <div class="sub"><div class="subh"><span class="badge">5A</span>推送入口 · 系统找我</div>
+        <div class="subg">
+          <div class="mod"><b>渠道适配</b><em>飞书 / 钉钉 / 企微，各一个实现</em></div>
+          <div class="mod"><b>消息渲染</b><em>结论 → 卡片 / 文本 / 表格</em></div>
+          <div class="mod"><b>事件接入</b><em>webhook 验签、去重、3 秒内返回</em></div>
+          <div class="mod new"><i>v4</i><b>身份识别</b><em>内部 ID ↔ 各平台身份，多端对齐</em></div>
+          <div class="mod new"><i>v5</i><b>卡片按钮</b><em>[已跟价] [暂不处理] [3天后回看]，点一下就是一条动作记录</em></div>
+        </div></div>
+      <div class="sub"><div class="subh"><span class="badge">5B</span>管理面板 · 我找系统</div>
+        <div class="subg">
+          <div class="mod todo"><i>待建</i><b>数据看板</b><em>竞品现状、变化历史</em></div>
+          <div class="mod todo"><i>待建</i><b>阈值配置</b><em>只有管理员可改，改完可试算</em></div>
+          <div class="mod todo"><i>待建</i><b>竞品池管理</b><em>增删归档、分层结果与理由</em></div>
+          <div class="mod todo"><i>待建</i><b>动作与回访</b><em>我做过什么、后来有没有用</em></div>
+          <div class="mod todo"><i>待建</i><b>团队与配额</b><em>谁盯了哪些、名额还剩多少</em></div>
+        </div></div>
+    </div>
+  </div>
+
+  <div class="axis">↓ 两个前端都只能往下调到 L4，不许各自实现业务逻辑</div>
+
+  <div class="layer" style="--c:#7c3aed">
+    <div class="lmeta"><div class="lno">L4</div><div class="lname">能力层</div>
+      <div class="lrole">一组能力，两个前端共用。飞书说一句话、面板点一下，落到同一个函数。</div>
+      <div class="lwhy">变化原因<br><b>能力增减 / 换模型</b></div></div>
+    <div class="mods">
+      <div class="sub"><div class="subh"><span class="badge">共用</span>能力接口</div>
+        <div class="subg">
+          <div class="mod core"><b>查询类</b><em>看日报、看详情、看我的池子</em></div>
+          <div class="mod core"><b>写入类</b><em>加竞品、归档、改阈值、记动作</em></div>
+          <div class="mod core"><b>求签类</b><em>跟不跟价、是不是清仓</em></div>
+          <div class="mod new"><i>v4</i><b>权限判定</b><em>这条数据你能看吗、这个阈值你能改吗</em></div>
+          <div class="mod"><b>参数校验</b><em>越界值挡住，别流进判断层</em></div>
+        </div></div>
+      <div class="sub"><div class="subh"><span class="badge">5A 专用</span>自然语言适配</div>
+        <div class="subg">
+          <div class="mod"><b>意图理解</b><em>人话 → 调哪个能力、带什么参数</em></div>
+          <div class="mod new"><i>v4</i><b>默认范围</b><em>「XX 怎么样」先查我的池子，查不到再问要不要扩</em></div>
+          <div class="mod"><b>结论转述</b><em>结构化结果 → 人话，不改结论</em></div>
+        </div></div>
+    </div>
+  </div>
+
+  <div class="conn">↓</div>
+
+  <div class="layer" style="--c:#0891b2">
+    <div class="lmeta"><div class="lno">L3</div><div class="lname">编排层</div>
+      <div class="lrole">时间驱动的那条轴。什么时候、按什么顺序、失败了怎么办。</div>
+      <div class="lwhy">变化原因<br><b>改流程 / 改频率</b></div></div>
+    <div class="mods">
+      <div class="subg">
+        <div class="mod"><b>巡检编排</b><em>盯哪些、多久一轮。快慢两组分开排</em></div>
+        <div class="mod new"><i>v4</i><b>配额分配</b><em>全局额度怎么分给十个人，谁优先</em></div>
+        <div class="mod new"><i>v4</i><b>告警路由</b><em>这条信号该推给谁——不是群发</em></div>
+        <div class="mod"><b>告警编排</b><em>分级 → 何时推 → 冷却去重</em></div>
+        <div class="mod"><b>日报编排</b><em>几点发、怎么排序、含哪几块</em></div>
+        <div class="mod"><b>池子维护</b><em>周度重分层、淘汰、补入</em></div>
+        <div class="mod"><b>失败降级</b><em>单点失败不拖垮全局</em></div>
+        <div class="mod todo"><i>待建</i><b>动作回访</b><em>N 天后问：做了没、有没有用</em></div>
+        <div class="mod new"><i>v4</i><b>规则体检</b><em>每条规则触发了几次。太吵、或从不响，都要报出来</em></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="conn">↓</div>
+
+  <div class="layer" style="--c:#d97706">
+    <div class="lmeta"><div class="lno">L2</div><div class="lname">认知层</div>
+      <div class="lrole">判断力全在这。进出都是值，不碰库、不碰网络、不发消息。纯函数。</div>
+      <div class="lwhy">变化原因<br><b>改规则 / 改阈值</b></div></div>
+    <div class="mods">
+      <div class="subg">
+        <div class="mod core"><b>变化识别</b><em>两次快照 + 阈值 → 信号</em></div>
+        <div class="mod core"><b>紧急度分级</b><em>P0 / P1 / P2，断货一律 P0</em></div>
+        <div class="mod core"><b>跟价裁定</b><em>保本线 → 清仓 → DOS → 盈亏单量 → 玩家数</em></div>
+        <div class="mod"><b>清仓判别</b><em>六维打分，历史季节性短路</em></div>
+        <div class="mod"><b>盈亏测算</b><em>保本价、边际单量、需要涨多少</em></div>
+        <div class="mod"><b>季节校准</b><em>预热 / 爆发 / 冷却缩放阈值</em></div>
+        <div class="mod"><b>战场分层</b><em>四同法则、加权词重合度</em></div>
+        <div class="mod todo"><i>待建</i><b>效果评估</b><em>动作执行后回看判断对不对</em></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="conn">↓</div>
+
+  <div class="layer" style="--c:#059669">
+    <div class="lmeta"><div class="lno">L1</div><div class="lname">取数层</div>
+      <div class="lrole">外部世界进系统的唯一闸门。只答「拿到了什么」，不答「这算不算重要」。</div>
+      <div class="lwhy">变化原因<br><b>换数据源 / 接口改版</b></div></div>
+    <div class="mods">
+      <div class="sub"><div class="subh"><span class="badge">知彼</span>竞品源 · 卖家精灵</div>
+        <div class="subg">
+          <div class="mod new"><i>v5</i><b>快通道 · 2~4h</b><em>价格、券、秒杀、BuyBox、BSR、库存状态</em></div>
+          <div class="mod new"><i>v5</i><b>慢通道 · 每天</b><em>关键词排位、流量词结构、评论增速</em></div>
+          <div class="mod core"><b>字段归一</b><em>→ UnifiedSnapshot，缺失要带含义</em></div>
+          <div class="mod"><b>质量分级</b><em>complete / partial / failed</em></div>
+        </div></div>
+      <div class="sub"><div class="subh"><span class="badge">知己</span>自家源 · Amazon SP-API</div>
+        <div class="subg">
+          <div class="mod new"><i>v5</i><b>自家适配</b><em>销量、库存、BuyBox。销量有 12~48h 归因延迟，取 7~14 天日均</em></div>
+          <div class="mod new"><i>v4</i><b>独立结构</b><em>→ SelfSnapshot，<b>不要塞进 UnifiedSnapshot</b></em></div>
+          <div class="mod new"><i>v4</i><b>独立限流</b><em>SP-API 配额和竞品源分开算</em></div>
+          <div class="mod todo"><i>第一版不做</i><b>Amazon Ads API</b><em>广告数据不在 SP-API 里，独立授权独立限流。有内部 ERP 就直接读库</em></div>
+        </div></div>
+      <div class="sub"><div class="subh"><span class="badge">共用</span>请求治理</div>
+        <div class="subg">
+          <div class="mod"><b>限流重试熔断</b><em>每个源一套，别混用</em></div>
+        </div></div>
+    </div>
+  </div>
+
+  <div class="conn">↓</div>
+
+  <div class="layer" style="--c:#475569">
+    <div class="lmeta"><div class="lno">L0</div><div class="lname">存储层</div>
+      <div class="lrole">地基。被所有层依赖，自己谁也不依赖，也不该有判断。</div>
+      <div class="lwhy">变化原因<br><b>数据量 / 查询方式</b></div></div>
+    <div class="mods">
+      <div class="subg">
+        <div class="mod"><b>竞品快照时序</b><em>每次采集一行</em></div>
+        <div class="mod new"><i>v4</i><b>自家快照时序</b><em>SP-API 单独一套，结构不同</em></div>
+        <div class="mod"><b>竞品池</b><em>知彼的锚点</em></div>
+        <div class="mod"><b>自身基线</b><em>成本、毛利、保本线</em></div>
+        <div class="mod new"><i>v5</i><b>对标绑定表</b><em>谁 · 盯哪个竞品 · 对自家哪个 ASIN。四同法则算出来的就是它</em></div>
+        <div class="mod new"><i>v5</i><b>用户与身份</b><em>内部 ID ↔ 飞书/企微/钉钉，多端对齐</em></div>
+        <div class="mod"><b>信号 / 决策日志</b><em>发过什么、判过什么</em></div>
+        <div class="mod todo"><i>待建</i><b>规则配置表</b><em>分作用域：公司默认 / 个人 / 产品，可继承可回滚</em></div>
+        <div class="mod todo"><i>待建</i><b>动作记录</b><em>缺它整条闭环断在这</em></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2 class="sec">五、调用规则 <span>层名不重要，禁止项才重要</span></h2>
+
+<table>
+<thead><tr><th style="width:100px">层</th><th style="width:210px">允许调用</th><th>禁止做</th></tr></thead>
+<tbody>
+<tr><td><b>L5 交互</b></td><td>只有 L4</td><td>自己判断业务、自己算数；在面板里写分析逻辑</td></tr>
+<tr><td><b>L4 能力</b></td><td>L3 / L2 / L0，只能经能力接口</td><td>直连 L1；自己编数据；跳过权限判定</td></tr>
+<tr><td><b>L3 编排</b></td><td>L1 / L2 / L0</td><td>写业务公式；直接发消息；<b>跳过配额和路由</b></td></tr>
+<tr><td><b>L2 认知</b></td><td>无。纯函数</td><td>读库、发网络、发消息、读时钟、读环境变量</td></tr>
+<tr><td><b>L1 取数</b></td><td>L0</td><td>任何业务判断；<b>把自家数据塞进竞品结构</b></td></tr>
+<tr><td><b>L0 存储</b></td><td>无</td><td>任何逻辑。有 if 的地方就不该在这一层</td></tr>
+</tbody>
+</table>
+
+<div class="note red">
+<b>两条新红线，都来自这次的信息：</b><br>
+① <b>自家数据和竞品数据不共用一张表、不共用一个结构。</b>SP-API 能给你自己的销量、库存、广告花费，竞品接口永远给不了。硬塞进一个 UnifiedSnapshot，会有一半字段永远是空——而这里的「空」不是没数据，是<b>这个维度本来就不适用</b>。两者混在一起，判断时一定出错。<br>
+② <b>规则可配，规则就会烂。</b>一人一套阈值之后，没有谁能凭感觉知道自己设得太松还是太紧。<br>
+所以阈值配置不能只是「一个输入框」，必须带<b>触发频率回显</b>——「按你的标准，过去 30 天会报 87 次」。没有这面镜子，三个月后每个人都在瞎调，而且没人知道自己调歪了。<br><br>
+③ <b>大模型只转述，不判断。</b>推送正文必须由 L2 的结构化输出拼装，<b>不能让 LLM 自由撰写</b>。<br>
+理由：L2 说「清仓概率 0.62」，LLM 会写成「大概率在清仓」——这个「大概率」是它加的，没人测过。
+一旦模型能在推送里新增判断，L2 就不再是唯一判断源，而推送是最难复核的地方（人只看结论不看算式）。
+<b>LLM 的位置在「你追问」之后，不在「主动推送」里。</b>
+</div>
+
+<h2 class="sec">六、还差什么 <span>按「不做会怎样」排序</span></h2>
+
+<div class="grid2">
+  <div class="card"><h3><s style="background:#2563eb"></s>缺面板（整块 L5-B）</h3>
+    <p>数据能看但只能靠猜、阈值只能找开发改、做了动作没处记。<b>先只做「阈值配置」</b>——它一次打通面板表单、配置表、参数注入三处，其余四个页面都是往里加。</p></div>
+  <div class="card"><h3><s style="background:#dc2626"></s>缺路由与配额</h3>
+    <p>十人版的生死线。<b>不做路由＝噪音淹死人，不做配额＝互相挤掉采集。</b>这两块不补，10 人版本的体验会比 1 人版更差。</p></div>
+  <div class="card"><h3><s style="background:#d97706"></s>缺自家数据接入</h3>
+    <p>SP-API 没接，意味着「跟价划不划算」只能靠手填的毛利率算。接上之后，保本线、DOS 这些判断才有真实数据支撑。</p></div>
+  <div class="card"><h3><s style="background:#7c3aed"></s>缺手</h3>
+    <p>动作记录 + 动作回访都空着。系统能说该做什么，但记不住谁做了什么，也不会回来问「那次有用吗」。</p></div>
+</div>
+
+<div class="note ok" style="margin-top:24px">
+<b>动手顺序（v5 调整）：</b><code>monitor-summary</code> 合并请求 + 接口更新频率压测 → 极简面板（对标绑定 + 阈值配置）→ 飞书按人路由 → <b>让 10 个人先用起来</b> → 再迭代 L2 算法 → 最后接自家数据。<br>
+<b>改主意的原因：</b>一线人员脑子里的判断规则，只有看到真实的告警卡片才会被激发出来。让他们先跑起来，比去问「你的判断标准是什么」有效得多——人对抽象问题的回答通常不准，看到具体案例才说得清。
+</div>
+
+<footer>
+  <span>Amazon 竞品监控 · 预期架构 v5</span>
+  <span>2026-10-28 · 层按「变化原因」分，模块按「被几条用例穿过」定</span>
+</footer>
+
+</div>
+</body>
+</html>

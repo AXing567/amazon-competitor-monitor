@@ -1,0 +1,234 @@
+%% MVP 增量设计 · 类图（对应 docs/DESIGN-mvp.md 附录 A）
+%% 注意：标 <<L2>> 的类必须是纯函数/纯数据，不得 import sqlalchemy / app.db / httpx / os / datetime.now
+classDiagram
+    direction LR
+
+    class User {
+        +int id
+        +str tenant_id
+        +str name
+        +str role
+        +bool active
+        +datetime created_at
+    }
+    class UserIdentity {
+        +int id
+        +int user_id
+        +str channel
+        +str external_id
+    }
+    class MyProduct {
+        +int id
+        +str tenant_id
+        +str asin
+        +float current_price
+        +float break_even_price
+        +float daily_sales_avg
+        +days_of_supply()
+    }
+    class Competitor {
+        +int id
+        +str tenant_id
+        +int my_product_id
+        +str asin
+        +str tier
+        +dict tier_reasons
+        +str status
+    }
+    class Snapshot {
+        +int id
+        +int competitor_id
+        +datetime captured_at
+        +float net_price
+        +int rank_sub
+        +str data_quality
+    }
+    class Signal {
+        +int id
+        +int competitor_id
+        +str signal_type
+        +str level
+        +datetime detected_at
+    }
+    class Action {
+        +int id
+        +int user_id
+        +int competitor_id
+        +int my_product_id
+        +int signal_id
+        +str action_type
+        +str reason
+        +str source
+    }
+    class CollectRun {
+        +int id
+        +int competitor_id
+        +datetime started_at
+        +bool ok
+        +str data_quality
+        +int signal_count
+        +str trigger
+    }
+    class ThresholdConfig {
+        +int id
+        +str tenant_id
+        +str scope
+        +str scope_id
+        +str group_name
+        +dict values
+        +int version
+    }
+    class ThresholdVersion {
+        +int id
+        +str scope
+        +str scope_id
+        +str group_name
+        +int version
+        +dict values
+        +str action
+    }
+    class CompetitorBinding {
+        +int id
+        +int user_id
+        +int competitor_id
+        +int my_product_id
+        +dict basis
+        +str basis_summary
+        +str status
+    }
+
+    class DiffThresholds {
+        <<dataclass L2>>
+        +float price_p0_pct
+        +float price_p1_pct
+        +float coupon_p0_pct
+        +float price_floor_guard
+        +int oos_confirm_minutes
+        +float rank_p0_pct
+        +float rank_p1_pct
+        +int rank_min_abs_move
+        +int review_p0_abs
+        +float review_p0_pct
+        +float rating_drop_p1
+        +float rating_floor
+        +dict phase_scale
+        +from_dict(d) DiffThresholds
+        +to_dict() dict
+        +merge(other) DiffThresholds
+    }
+    class TieringThresholds {
+        <<dataclass L2>>
+        +float price_ratio_min
+        +float price_ratio_max
+        +float keyword_overlap_gate
+        +float overlap_s
+        +float overlap_a
+        +float overlap_b
+        +float core_coverage
+        +from_dict(d) TieringThresholds
+    }
+    class NotifyThresholds {
+        <<dataclass L2>>
+        +int cooldown_p0_hours
+        +int cooldown_p1_hours
+        +int cooldown_p2_hours
+    }
+    class DiffEngine {
+        <<L2 纯函数>>
+        +str phase
+        +DiffThresholds th
+        +compare(prev, curr, tier, my_price, oos_confirmed) list~SignalDraft~
+    }
+    class ThresholdSpec {
+        <<L2 模块级常量>>
+        +dict THRESHOLD_SPEC
+    }
+
+    class SettingsStore {
+        <<L3>>
+        +resolve(tenant, user_id, my_product_id) tuple
+        +resolve_diff_thresholds(tenant, my_product_id) DiffThresholds
+        +save(scope, scope_id, group, values, operator) int
+        +rollback(scope, scope_id, group, version) int
+        +list_versions(scope, scope_id, group) list
+    }
+    class Simulator {
+        <<L3>>
+        +simulate_diff_thresholds(tenant, values, days, asin) dict
+    }
+    class IdentityService {
+        <<L3>>
+        +ensure_default_user() User
+        +resolve_current_user(user_id) User
+        +resolve_by_external(channel, ext) User
+        +upsert_identity(user_id, channel, ext) dict
+    }
+    class ActionLog {
+        <<L3>>
+        +record(ctx, asin, action_type) dict
+        +list_actions(days, asin, user_id) list
+        +sign_action_token(signal_id, action_type) str
+        +verify_action_token(token) tuple
+    }
+    class BindingService {
+        <<L3>>
+        +upsert(user_id, competitor_id, my_product_id) CompetitorBinding
+        +resolve_my_product(user_id, competitor_id) int
+        +rebuild_basis(competitor_id) dict
+        +build_basis_summary(tier_reasons) str
+    }
+    class HealthService {
+        <<L3>>
+        +collect_health(tenant, days) dict
+        +price_trust(tenant, days) list
+    }
+
+    class CapContext {
+        <<L4>>
+        +str tenant_id
+        +int user_id
+        +str source
+    }
+    class Capability {
+        <<L4>>
+        +str name
+        +str scope
+        +str group
+        +str title
+        +list~ParamSpec~ params
+        +handler(ctx, kwargs) dict
+    }
+    class CapabilityRegistry {
+        <<L4>>
+        +dict _REGISTRY
+        +call(name, ctx, kwargs) dict
+        +list_capabilities(scope) list
+        +to_schema(name) dict
+    }
+
+    User "1" --> "*" UserIdentity : 拥有平台身份
+    User "1" --> "*" CompetitorBinding : 个人对标
+    CompetitorBinding "*" --> "1" Competitor
+    CompetitorBinding "*" --> "1" MyProduct
+    MyProduct "1" --> "*" Competitor : 监控关系（现有）
+    Competitor "1" --> "*" Snapshot
+    Competitor "1" --> "*" Signal
+    Competitor "1" --> "*" CollectRun
+    Competitor "1" --> "*" Action
+    Signal "0..1" --> "*" Action : 触发依据
+    ThresholdConfig "1" --> "*" ThresholdVersion : 每次变更留痕
+    DiffEngine --> DiffThresholds : 从外部传入，不自造
+    ThresholdSpec ..> DiffThresholds : 定义字段与默认值
+    ThresholdSpec ..> TieringThresholds
+    SettingsStore ..> DiffThresholds : 构造
+    SettingsStore ..> ThresholdConfig : 读写
+    Simulator ..> DiffEngine : 复用生产同一算法
+    Simulator ..> SettingsStore : 取生效值
+    CapabilityRegistry o-- Capability
+    Capability --> CapContext : 显式携带身份
+    Capability ..> SettingsStore
+    Capability ..> Simulator
+    Capability ..> BindingService
+    Capability ..> ActionLog
+    Capability ..> HealthService
+    Capability ..> IdentityService

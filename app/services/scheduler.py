@@ -95,9 +95,17 @@ async def job_pool_maintenance() -> None:
     所以四同法则必须定期重跑，否则池子会慢慢失真。
     """
     from app.domain.tiering import judge_tier
+    from app.services import settings_store
     from app.services.collector import row_to_unified
 
+    # TODO(下一轮 · 数据模型): 补 `snapshots.keywords`(JSON) 与 `MyProduct.category_path`。
+    #   缺的是什么：快照里没有竞品流量词，MyProduct 没有类目路径。
+    #   为什么缺：关键词是卖家精灵的慢通道（5~15s/次、有配额），采集时取到过但没落库，
+    #     所以这里 row_to_unified 出来的快照 keywords 恒为空；my_category_path 更是硬编码 None。
+    #   补齐后：decidable_dims 常态为 3，下面的 insufficient 分支自然不再命中。
+    #   注意：那个分支不要删——它是「将来再加维度」的护栏，不是临时补丁。
     changed = 0
+    skipped: list[str] = []
     with get_session() as s:
         comps = list(
             s.execute(
@@ -116,6 +124,9 @@ async def job_pool_maintenance() -> None:
                 continue
             snap = row_to_unified(last, comp.marketplace)
 
+            # 阈值必须从配置读，否则「面板改了分层门槛、周维护还按老标准重算」，
+            # 池子会跟配置慢慢脱节。只走 company + product 两层：分层是产品属性。
+            # 注意：每轮都重新 resolve，不做进程内缓存——配置是随时会被改的。
             res = judge_tier(
                 my_price=my.current_price,
                 my_core_keywords=my.core_keywords or {},
@@ -123,7 +134,18 @@ async def job_pool_maintenance() -> None:
                 my_daily_units=my.daily_sales_avg,
                 comp=snap,
                 functional_match=comp.functional_match,
+                thresholds=settings_store.resolve_tiering_thresholds(
+                    settings.tenant_id, my.id
+                ),
             )
+            # 证据不足 → 跳过，一个字段都不写回。
+            # 为什么不写回 res.tier：那等于把「判不了」记成「判成 C」，而 C 是有含义的结论。
+            # 之前这个任务就是这么把整个池子每周扫平一次的，而且完全静默。
+            # 也不覆盖 tier_reasons：半份理由会在半年后被当成「当初就是这么判的」。
+            if res.insufficient:
+                skipped.append(comp.asin)
+                continue
+
             if res.tier != comp.tier:
                 logger.info("竞品 %s 分层调整 %s → %s", comp.asin, comp.tier, res.tier)
                 comp.tier = res.tier
@@ -134,6 +156,12 @@ async def job_pool_maintenance() -> None:
             comp.keyword_overlap = res.keyword_overlap
             comp.node_match = res.node_match
 
+    if skipped:
+        logger.info(
+            "本轮 %d 个竞品因证据不足跳过重分层（keywords 未落库 / 类目路径缺失）：%s",
+            len(skipped),
+            "、".join(skipped[:10]) + ("…" if len(skipped) > 10 else ""),
+        )
     logger.info("池子维护完成，%d 个竞品分层发生变化", changed)
 
 

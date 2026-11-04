@@ -1,38 +1,49 @@
-"""Agent 工具层。
+"""Agent 工具层 —— **薄适配层**，实现在 `app/capabilities`。
 
-这里定义模型能调用的全部能力。原则：
+## 这一层为什么现在这么薄
 
-1. **工具只做一件事**，名称即语义，模型不会误用。
-2. **返回值永远是 JSON 友好的 dict**，模型能直接读，不会因为格式错误乱编。
-3. **失败也返回结构化结果**（ok=false + error），不要抛异常给模型——
-   异常会让模型进入「猜」的模式，比直接说「不行」更糟。
-4. **每个工具的 description 都写清楚「什么时候用」**，
-   这是决定模型会不会正确调用的关键，比参数描述重要得多。
+以前这里有 12 个 `tool_xxx` 函数，每个都直接开数据库会话、拼业务参数、算结论。
+面板要同样的数据时只能另写一份，于是同一个问题（"有几个 S 级"）有两个答案。
+
+现在这里只剩三件事：
+
+1. `TOOL_SCHEMAS` —— 给模型看的函数定义（**这是 Agent 独有的东西**，
+   面板不需要它，所以它留在这里而不下沉）；
+2. `execute_tool` —— 把 `(name, args)` 转成 `capabilities.call(name, ctx=..., **args)`；
+3. `tool_names()` —— 模型可见的工具名，**必须与 `TOOL_SCHEMAS` 完全一致**。
+
+业务逻辑一行都不在这里了。想改行为，去 `app/capabilities/` 改一处，两个入口同时生效。
+
+## `ctx.source` 为什么是 `"agent"`
+
+它决定了「这次采集算谁触发的」（`collect_runs.trigger`）和「这条动作的来源」
+（`actions.source`）。如果这里偷懒传 `"panel"`，健康页上"模型自己决定去采集"
+和"人在面板上点的采集"就分不开了，而这两者的失败率差得很远。
+
+## 身份（`user_id`）为什么是 `None`
+
+Agent 这一侧目前没有把飞书 `open_id` 一路传到工具层（`llm.achat` 只带 `session_id`）。
+所以这里不编造用户，显式传 `None` —— 下游会回落默认用户，并且这处回落是
+**有据可查的行为**，而不是"某个模块级单例里恰好存着上次请求的用户"。
+把 `open_id` 传下来是下一轮的事（`app/capabilities` 的 `CapContext` 已经准备好了）。
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
-from sqlalchemy import desc, select
-
+from app.capabilities import CapContext, safe_call
+from app.capabilities.types import SOURCE_AGENT
 from app.config import settings
-from app.db import get_session
-from app.domain import baseline as baseline_mod
-from app.domain.decision import (
-    build_out_of_stock_decision,
-    judge_clearance,
-    judge_price_follow,
-)
-from app.models import Competitor, SeasonCalendar, Signal, Snapshot
-from app.services import briefer, collector, pool
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
 # 函数定义（DeepSeek / OpenAI function calling 格式）
+#
+# 这一份是 Agent 独占的：模型靠它决定"什么时候调哪个"，
+# 所以 description 写的是使用场景而不是参数说明——参数说明在 properties 里。
 # ============================================================
 
 TOOL_SCHEMAS: list[dict] = [
@@ -68,8 +79,11 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "tier": {
                         "type": "string",
-                        "enum": ["S", "A", "B", "C"],
-                        "description": "只看某一层，不传则看全部",
+                        # unknown 必须在这里：止血补丁之后「证据不足、暂未判定」的竞品
+                        # 就是 unknown 级。枚举里没有它，模型就无法回答「哪些还没判定」，
+                        # 只能猜成 C 级——那正是我们要修的那个 bug。
+                        "enum": ["S", "A", "B", "C", "unknown"],
+                        "description": "只看某一层，不传则看全部；unknown 表示证据不足、暂未判定",
                     }
                 },
             },
@@ -110,7 +124,7 @@ TOOL_SCHEMAS: list[dict] = [
                     "asin": {"type": "string", "description": "要加的竞品 ASIN"},
                     "force": {
                         "type": "boolean",
-                        "description": "若未通过四同法则但用户坚持要加，传 true，会标记为观察级",
+                        "description": "若未通过四同法则但用户坚持要加，传 true",
                     },
                 },
                 "required": ["asin"],
@@ -149,8 +163,7 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "set_baseline",
             "description": (
                 "设置或更新自家产品的锚点数据（售价、保本价、日均销量、库存、补货周期等）。"
-                "用户说『我售价 29.99』『我库存还有 800 件』时用。"
-                "只传要改的字段，其他不变。"
+                "用户说『我售价 29.99』『我库存还有 800 件』时用。只传要改的字段，其他不变。"
             ),
             "parameters": {
                 "type": "object",
@@ -177,8 +190,8 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "judge_price_follow",
             "description": (
-                "判断对手降到某个价位时，我方该不该跟进。会跑五道关卡：保本线、清仓、库存、盈亏平衡单量、战场玩家数。"
-                "用户问『他降到 19.99 我要不要跟』时用。"
+                "判断对手降到某个价位时，我方该不该跟进。会跑五道关卡：保本线、清仓、库存、"
+                "盈亏平衡单量、战场玩家数。用户问『他降到 19.99 我要不要跟』时用。"
             ),
             "parameters": {
                 "type": "object",
@@ -280,391 +293,46 @@ TOOL_SCHEMAS: list[dict] = [
 ]
 
 
-# ============================================================
-# 实现
-# ============================================================
-
-
-def tool_get_daily_brief(args: dict) -> dict:
-    hours = int(args.get("hours") or 24)
-    brief = briefer.build_daily_brief(settings.tenant_id, hours=hours)
-    data = brief.to_dict()
-    data["text"] = brief.to_text()
-    return {"ok": True, **data}
-
-
-def tool_list_competitors(args: dict) -> dict:
-    items = pool.list_competitors(settings.tenant_id, tier=args.get("tier"))
-    counts: dict[str, int] = {}
-    for it in items:
-        counts[it["tier"]] = counts.get(it["tier"], 0) + 1
-    return {"ok": True, "count": len(items), "by_tier": counts, "items": items}
-
-
-def tool_get_competitor_detail(args: dict) -> dict:
-    return pool.get_competitor_detail(
-        settings.tenant_id, args.get("asin", ""), history=int(args.get("history") or 14)
-    )
-
-
-def tool_add_competitor(args: dict) -> dict:
-    return pool.add_competitor(
-        settings.tenant_id,
-        args.get("asin", ""),
-        force=bool(args.get("force")),
-    )
-
-
-def tool_archive_competitor(args: dict) -> dict:
-    return pool.archive_competitor(
-        settings.tenant_id, args.get("asin", ""), args.get("reason", "")
-    )
-
-
-def tool_check_anchor(args: dict) -> dict:
-    with get_session() as s:
-        from app.models import MyProduct
-
-        my = s.execute(
-            select(MyProduct).where(MyProduct.tenant_id == settings.tenant_id).limit(1)
-        ).scalar_one_or_none()
-        if my is None:
-            return {
-                "ok": True,
-                "exists": False,
-                "message": "还没设置自家锚点。至少先告诉我三个数：售价、保本价、日均销量。",
-                "text": "还没设置自家锚点。最先要补的三样：售价 / 保本价 / 日均销量。",
-            }
-        a = baseline_mod.assess(my)
-        data = a.to_dict()
-        data["exists"] = True
-        data["text"] = _render_anchor_text(a)
-        return {"ok": True, **data}
-
-
-def _render_anchor_text(a) -> str:
-    lines = [f"锚点就绪度 {a.readiness}%（{a.grade} 级）"]
-    for d in a.dimensions:
-        mark = "✅" if d.complete else ("⚠️" if d.filled else "❌")
-        lines.append(
-            f"{mark} {d.name} {d.filled}/{d.total}"
-            + ("" if d.complete else f" — 缺：{'、'.join(d.missing)}")
-        )
-    if a.warnings:
-        lines.append("")
-        lines += [f"· {w}" for w in a.warnings]
-    caps = {
-        "分层判定": a.can_tier,
-        "跟价判断": a.can_judge_price_follow,
-        "进攻窗口": a.can_judge_attack_window,
-        "抄 listing 检测": a.can_detect_listing_copy,
-    }
-    lines.append("")
-    lines.append(
-        "当前能做：" + "、".join(k for k, v in caps.items() if v) or "当前什么都做不了"
-    )
-    missing_caps = [k for k, v in caps.items() if not v]
-    if missing_caps:
-        lines.append("暂时做不了：" + "、".join(missing_caps))
-    return "\n".join(lines)
-
-
-def tool_set_baseline(args: dict) -> dict:
-    fields = {k: v for k, v in args.items() if v is not None}
-    res = pool.update_baseline(settings.tenant_id, **fields)
-    res["ok"] = True
-    return res
-
-
-def tool_judge_price_follow(args: dict) -> dict:
-    with get_session() as s:
-        from app.models import MyProduct
-
-        my = s.execute(
-            select(MyProduct).where(MyProduct.tenant_id == settings.tenant_id).limit(1)
-        ).scalar_one_or_none()
-        if my is None or not my.current_price:
-            return {"ok": False, "error": "还没有设置自家售价，无法判断"}
-        if not my.break_even_price and not my.target_margin_rate:
-            return {
-                "ok": False,
-                "error": "缺保本价，无法判断。要么直接告诉我保本价，要么告诉我目标毛利率我帮你算",
-            }
-
-        be_price = my.break_even_price
-        if not be_price and my.target_margin_rate:
-            be_price = baseline_mod.estimate_break_even_price(
-                price=my.current_price, margin_rate=my.target_margin_rate
-            )
-
-        new_price = args.get("competitor_new_price")
-        if new_price is None:
-            # 退化为用最近一次采集到的最低净价
-            latest = s.execute(
-                select(Snapshot)
-                .join(Competitor, Snapshot.competitor_id == Competitor.id)
-                .where(Competitor.tenant_id == settings.tenant_id)
-                .order_by(desc(Snapshot.captured_at))
-                .limit(1)
-            ).scalar_one_or_none()
-            new_price = (latest.net_price or latest.price) if latest else None
-        if not new_price:
-            return {"ok": False, "error": "没有可用的对手价格"}
-
-        assessment = baseline_mod.assess(my)
-
-        res = judge_price_follow(
-            competitor_new_price=float(new_price),
-            my_current_price=my.current_price,
-            my_break_even_price=float(be_price),
-            my_unit_profit_now=my.current_price * (my.target_margin_rate or 0.2),
-            my_daily_units=my.daily_sales_avg or 0,
-            competitor_is_clearance=bool(args.get("competitor_is_clearance")),
-            market_players=int(args.get("market_players") or 3),
-            my_dos=assessment.days_of_supply,
-        )
-        data = res.to_dict()
-        data["ok"] = True
-        data["inputs"] = {
-            "competitor_new_price": new_price,
-            "my_current_price": my.current_price,
-            "my_break_even_price": be_price,
-            "my_dos": assessment.days_of_supply,
-        }
-        return data
-
-
-def tool_judge_clearance(args: dict) -> dict:
-    asin = (args.get("asin") or "").strip().upper()
-
-    with get_session() as s:
-        comp = s.execute(
-            select(Competitor).where(
-                Competitor.tenant_id == settings.tenant_id, Competitor.asin == asin
-            )
-        ).scalar_one_or_none()
-        if comp is None:
-            return {"ok": False, "error": f"{asin} 不在池中"}
-
-        snaps = list(
-            s.execute(
-                select(Snapshot)
-                .where(Snapshot.competitor_id == comp.id)
-                .order_by(desc(Snapshot.captured_at))
-                .limit(20)
-            ).scalars()
-        )
-
-    if len(snaps) < 2:
-        return {
-            "ok": False,
-            "error": "历史数据不足两条，无法判断趋势。建议先观察几天。",
-        }
-
-    prices = [x.net_price or x.price for x in snaps if (x.net_price or x.price)]
-    price_drop_pct = None
-    if len(prices) >= 2 and prices[-1]:
-        peak = max(prices)
-        price_drop_pct = round((1 - prices[0] / peak) * 100, 1) if peak else None
-
-    # 库存单调下降的判断：用 stock_hint / in_stock 序列
-    hints = [(x.stock_hint or "").upper() for x in snaps if x.stock_hint]
-    stock_declining = None
-    if len(hints) >= 3:
-        order = {"IN_STOCK": 2, "LOW_STOCK": 1, "OOS": 0}
-        vals = [order.get(h) for h in hints if h in order]
-        if len(vals) >= 3:
-            stock_declining = all(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)) and vals[0] > vals[-1]
-
-    # Listing 是否停维护（用标题与主图是否长期不变粗略判断）
-    titles = {x.title for x in snaps if x.title}
-    listing_frozen = len(titles) == 1 and len(snaps) >= 5
-
-    res = judge_clearance(
-        price_drop_pct=price_drop_pct,
-        stock_declining=stock_declining,
-        no_restock=None,                       # 补货行为从公开数据看不出来
-        ads_stopped=args.get("ads_stopped"),
-        listing_frozen=listing_frozen,
-        brand_shrinking=args.get("brand_shrinking"),
-        historical_seasonal=None,
-        deep_coupon=None,
-        variants_delisted=None,
-    )
-
-    data = res.to_dict()
-    data["ok"] = True
-    data["auto_extracted"] = {
-        "price_drop_pct": price_drop_pct,
-        "stock_declining": stock_declining,
-        "listing_frozen": listing_frozen,
-        "snapshots_used": len(snaps),
-    }
-    data["unknown_signals"] = [
-        "是否停止补货（公开数据看不到）",
-        "广告位是否消失（需人工观察或关键词广告位数据）",
-        "品牌其他 ASIN 是否同步收缩",
-        "变体是否逐步下架",
-    ]
-    data["advice"] = (
-        "清仓判断里最硬的一条是「库存只降不补」——这个从公开数据拿不到全貌，"
-        "但连续几次采集看到 LOW_STOCK 一直不回到 IN_STOCK，基本就能定性。"
-    )
-    return data
-
-
-def tool_collect_now(args: dict) -> dict:
-    asin = (args.get("asin") or "").strip().upper()
-
-    if asin:
-        with get_session() as s:
-            comp = s.execute(
-                select(Competitor).where(
-                    Competitor.tenant_id == settings.tenant_id, Competitor.asin == asin
-                )
-            ).scalar_one_or_none()
-            if comp is None:
-                return {"ok": False, "error": f"{asin} 不在池中"}
-            cid = comp.id
-        res = collector.collect_competitor(cid)
-        return {
-            "ok": res.ok,
-            "asin": res.asin,
-            "data_quality": res.data_quality,
-            "signal_count": len(res.signals),
-            "signals": [s.to_row() for s in res.signals],
-            "errors": res.errors,
-        }
-
-    # 同步上下文里跑异步采集
-    import asyncio
-
-    total = asyncio.run(collector.collect_all(settings.tenant_id))
-    return {
-        "ok": True,
-        "competitors": len(total),
-        "success": sum(1 for r in total if r.ok),
-        "signals": sum(len(r.signals) for r in total),
-        "p0": sum(r.p0_count for r in total),
-        "details": [
-            {
-                "asin": r.asin,
-                "ok": r.ok,
-                "quality": r.data_quality,
-                "signals": len(r.signals),
-                "errors": r.errors[:3],
-            }
-            for r in total
-        ],
-    }
-
-
-def tool_set_season_phase(args: dict) -> dict:
-    with get_session() as s:
-        row = SeasonCalendar(
-            tenant_id=settings.tenant_id,
-            category=args.get("category", "default"),
-            phase=args.get("phase", "blast"),
-            start_md=args.get("start_md", "11-01"),
-            end_md=args.get("end_md", "12-31"),
-            interval="15m" if args.get("phase") == "blast" else "1h",
-        )
-        s.add(row)
-        s.flush()
-        return {
-            "ok": True,
-            "category": row.category,
-            "phase": row.phase,
-            "window": f"{row.start_md} ~ {row.end_md}",
-            "effect": (
-                "旺季期间采集间隔缩短到 15 分钟，信号阈值收紧 20%"
-                if row.phase == "blast"
-                else "该时段按常规频率采集"
-            ),
-        }
-
-
-def tool_get_my_status(args: dict) -> dict:
-    from app.models import MyProduct
-
-    with get_session() as s:
-        my = s.execute(
-            select(MyProduct).where(MyProduct.tenant_id == settings.tenant_id).limit(1)
-        ).scalar_one_or_none()
-        if my is None:
-            return {"ok": True, "anchor_exists": False, "message": "尚未设置自家锚点"}
-
-        a = baseline_mod.assess(my)
-        comps = list(
-            s.execute(
-                select(Competitor).where(
-                    Competitor.tenant_id == settings.tenant_id,
-                    Competitor.status == "active",
-                )
-            ).scalars()
-        )
-        pool_counts: dict[str, int] = {}
-        for c in comps:
-            pool_counts[c.tier] = pool_counts.get(c.tier, 0) + 1
-
-        from datetime import timedelta
-
-        since = datetime.now() - timedelta(hours=24)
-        recent = s.execute(
-            select(Signal).where(
-                Signal.tenant_id == settings.tenant_id, Signal.detected_at >= since
-            )
-        ).scalars()
-        sig_list = list(recent)
-
-        return {
-            "ok": True,
-            "anchor_exists": True,
-            "anchor": a.to_dict(),
-            "portfolio": pool_counts,
-            "last_24h": {
-                "p0": sum(1 for x in sig_list if x.level == "P0"),
-                "p1": sum(1 for x in sig_list if x.level == "P1"),
-                "p2": sum(1 for x in sig_list if x.level == "P2"),
-            },
-        }
+#: 模型可见的工具名。**与 `TOOL_SCHEMAS` 同源**，
+#: 所以两边永远不会漂移（验收标准 #2 就是这条等式）。
+_TOOL_NAMES: tuple[str, ...] = tuple(s["function"]["name"] for s in TOOL_SCHEMAS)
 
 
 # ============================================================
-# 注册表
+# 唯一出口
 # ============================================================
 
-_REGISTRY: dict[str, Callable[[dict], dict]] = {
-    "get_daily_brief": tool_get_daily_brief,
-    "list_competitors": tool_list_competitors,
-    "get_competitor_detail": tool_get_competitor_detail,
-    "add_competitor": tool_add_competitor,
-    "archive_competitor": tool_archive_competitor,
-    "check_anchor": tool_check_anchor,
-    "set_baseline": tool_set_baseline,
-    "judge_price_follow": tool_judge_price_follow,
-    "judge_clearance": tool_judge_clearance,
-    "collect_now": tool_collect_now,
-    "set_season_phase": tool_set_season_phase,
-    "get_my_status": tool_get_my_status,
-}
+
+def _ctx() -> CapContext:
+    """Agent 侧的调用上下文。
+
+    `user_id=None` 是**显式**的"我不知道是谁"，不是遗漏：
+    `llm.achat` 目前只带 `session_id`，把 open_id 传下来是下一轮的事。
+    编一个 user_id 出来只会让动作记录指向错误的人。
+    """
+    return CapContext(tenant_id=settings.tenant_id, user_id=None, source=SOURCE_AGENT)
 
 
 def execute_tool(name: str, args: dict | None = None) -> dict:
-    """统一入口。任何异常都被收成 ok=false，绝不把堆栈丢给模型。"""
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        return {"ok": False, "error": f"未知工具：{name}", "available": list(_REGISTRY)}
+    """统一入口。任何异常都被收成 `ok=false`，绝不把堆栈丢给模型。
 
-    try:
-        result = fn(args or {})
-        if not isinstance(result, dict):
-            return {"ok": True, "result": result}
-        return result
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("工具 %s 执行失败", name)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    签名与返回值契约（`{"ok": bool, ...}`）**保持不变**——`llm.py` 与既有的
+    飞书回调链都依赖它，改动签名会让"工具调用"这条主链路静默失效。
+    """
+    payload: dict[str, Any] = args if isinstance(args, dict) else {}
+    if not isinstance(args, dict) and args is not None:
+        logger.warning("工具 %s 的入参不是 dict（%r），已按空参数处理", name, type(args))
+
+    result = safe_call(name, ctx=_ctx(), **payload)
+    if not isinstance(result, dict):
+        return {"ok": True, "result": result}
+    return result
 
 
 def tool_names() -> list[str]:
-    return list(_REGISTRY)
+    """模型可见的工具名（= `TOOL_SCHEMAS` 里的名字，不含能力层的另外 21 个）。
+
+    为什么不返回全部 33 个能力：模型看不见的能力它就不会调，这 12 个才是它的全部世界。
+    多返回一些"技术上存在"的名字，只会让「schema 与注册表一致」这条自检失去意义。
+    """
+    return list(_TOOL_NAMES)

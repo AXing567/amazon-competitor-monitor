@@ -5,7 +5,10 @@
 - 采集可以高频静默，但只有这里判定为 P0/P1 的才允许进推送队列。
 - P2 一律归档，只在周报/日报里体现，不单独打扰。
 
-阈值全部集中在顶部 RULES，方便老板按自己的类目调。
+**阈值不在本文件里决定**：`DiffEngine(phase, thresholds=...)` 从外面接收
+`DiffThresholds`。本文件的 `RULES` 已降级为「默认值来源 + 迁移期兼容」，
+运行时不再读它——读取它是 `app/domain/thresholds.py` 的 default，最终仍由
+`DiffThresholds()` 提供。这样同一段判定代码既能跑生产阈值，也能跑试算阈值。
 """
 from __future__ import annotations
 
@@ -13,9 +16,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app.adapters.unified import UnifiedSnapshot
+from app.domain.thresholds import DiffThresholds
 
 # ============================================================
-# 阈值表（唯一调参入口）
+# 默认阈值表（**降级**：运行时不再从这里读，见 DiffEngine.__init__）
+#
+# 保留它有两个理由：
+# 1. `tests/test_thresholds.py` 用「DiffThresholds() 逐键等于 RULES」这条断言
+#    锁死默认值，防止有人只改一边、让 31 个领域测试的期望值悄悄漂移；
+# 2. 下一轮做配置迁移时，它是「老值长什么样」的书面记录。
+# 新增阈值请加进 `app/domain/thresholds.py::THRESHOLD_SPEC`，不要加到这里。
 # ============================================================
 
 RULES = {
@@ -85,12 +95,19 @@ class SignalDraft:
 class DiffEngine:
     """对比前后两份快照，产出信号列表。"""
 
-    def __init__(self, phase: str = "warmup"):
-        self.phase = phase if phase in RULES["phase_scale"] else "warmup"
-        self.scale = RULES["phase_scale"][self.phase]
+    def __init__(self, phase: str = "warmup", thresholds: DiffThresholds | None = None):
+        """phase 位置参数保持兼容（`DiffEngine("blast")` 仍在用）。
+
+        thresholds 不传就用默认值：这样 31 个领域测试、demo 脚本、
+        以及任何还没接配置的调用点都不用改一行。
+        """
+        self.th = thresholds or DiffThresholds()
+        self.phase = phase if phase in self.th.phase_scale else "warmup"
+        self.scale = self.th.phase_scale[self.phase]
 
     def _t(self, key: str) -> float:
-        return RULES[key] * self.scale
+        """取「比例类阈值 × 季节系数」。绝对值类阈值（条数、名次）不走这里。"""
+        return getattr(self.th, key) * self.scale
 
     # --------------------------------------------------------
     # 入口
@@ -141,7 +158,7 @@ class DiffEngine:
 
         if p_prev and p_curr and p_prev > 0:
             pct = (p_curr - p_prev) / p_prev
-            if abs(pct) >= RULES["price_floor_guard"]:
+            if abs(pct) >= self.th.price_floor_guard:
                 p0 = self._t("price_p0_pct")
                 p1 = self._t("price_p1_pct")
 
@@ -204,7 +221,7 @@ class DiffEngine:
         if prev.coupon_value is not None and curr.coupon_value is not None and p_prev:
             coupon_delta = curr.coupon_value - prev.coupon_value
             coupon_pct = coupon_delta / p_prev
-            if coupon_pct >= RULES["coupon_p0_pct"]:
+            if coupon_pct >= self.th.coupon_p0_pct:
                 out.append(
                     SignalDraft(
                         category="price",
@@ -359,7 +376,7 @@ class DiffEngine:
             return out
 
         move = curr_r - prev_r            # 正数 = 名次变差
-        if abs(move) < RULES["rank_min_abs_move"]:
+        if abs(move) < self.th.rank_min_abs_move:
             return out
 
         pct = move / prev_r
@@ -419,7 +436,7 @@ class DiffEngine:
 
         if prev.rating is not None and curr.rating is not None:
             drop = prev.rating - curr.rating
-            if drop >= RULES["rating_drop_p1"]:
+            if drop >= self.th.rating_drop_p1:
                 out.append(
                     SignalDraft(
                         category="reputation",
@@ -433,7 +450,7 @@ class DiffEngine:
                     )
                 )
             # 跌破 4.0 是转化率的心理分水岭，单独报一次
-            if prev.rating >= RULES["rating_floor"] > curr.rating:
+            if prev.rating >= self.th.rating_floor > curr.rating:
                 out.append(
                     SignalDraft(
                         category="reputation",
@@ -450,7 +467,7 @@ class DiffEngine:
             delta = curr.review_count - prev.review_count
             if delta > 0:
                 pct = delta / max(prev.review_count, 1)
-                if delta >= RULES["review_p0_abs"] or pct >= RULES["review_p0_pct"]:
+                if delta >= self.th.review_p0_abs or pct >= self.th.review_p0_pct:
                     out.append(
                         SignalDraft(
                             category="reputation",

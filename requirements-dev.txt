@@ -1,0 +1,5 @@
+# 开发/测试依赖（运行服务只需要 requirements.txt）
+#
+# 为什么单独一个文件：pytest 是测试专用，装到生产环境里只是多一份攻击面和
+# 一份要跟着升级的依赖。部署时只装 requirements.txt。
+pytest>=8

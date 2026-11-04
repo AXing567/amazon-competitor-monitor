@@ -115,3 +115,20 @@ class TieringResult(BaseModel):
     node_match: Optional[bool] = None
 
     reject_reason: Optional[str] = None
+
+    # ---- 结论完备性（本轮新增；只加字段，不改上面任何字段的含义）----
+    # decidable_dims: 价格带 / 流量池 / 节点 三个维度里，实际能判定的有几个
+    # insufficient:   decidable_dims < 2，即证据不足以下结论
+    # 为什么需要它：缺数据时各维度都是 None，按 False 处理会得到一个
+    # 「沉默的错误判定」——系统不知道自己不知道。而拿不到证据 ≠ 证据表明不成立。
+    decidable_dims: int = 0
+    insufficient: bool = False
+
+    @property
+    def effective_tier(self) -> str:
+        """消费方应该读这个，而不是直接读 `tier`。
+
+        证据不足时返回 `"unknown"`（待判定，缺数据），而不是把 `tier` 里的
+        兜底 `C` 当成结论下发。`tier` 保留原含义只为兼容老调用点。
+        """
+        return "unknown" if self.insufficient else self.tier

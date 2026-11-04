@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     tenant_id: str = "default"
     tenant_name: str = "我的店铺"
 
+    # ---- 面板 / 回调 ----
+    # 默认空 → 飞书按钮回调 **fail-closed**：未配置就直接拒绝。
+    # 理由：一个能被随意伪造「老板已决定跟价」的端点，比没有这个端点危险得多。
+    action_token_secret: str = ""
+    panel_page_size: int = 200
+
     # ---- 调度 ----
     daily_brief_hour: int = 9
     daily_brief_minute: int = 0

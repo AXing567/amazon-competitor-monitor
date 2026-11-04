@@ -44,6 +44,10 @@ class BriefItem:
     actions: list[str] = field(default_factory=list)
     confidence: Optional[float] = None
     competitor_id: Optional[int] = None
+    #: 这条变化是**什么时候**发生的。
+    #: 面板看板要显示「最近变化时间」；飞书卡片用不到，但少了它面板就得对
+    #: 每个竞品再查一次信号（N+1），而且在飞书里回"这是几点的事"也答不上来。
+    detected_at: Optional[datetime] = None
 
 
 @dataclass
@@ -157,7 +161,20 @@ def build_daily_brief(
     *,
     hours: int = 24,
     include_p1: bool = True,
+    user_id: int | str | None = None,
 ) -> DailyBrief:
+    """组装日报。
+
+    `user_id` 本轮**不参与任何计算**，只是一个零成本的伏笔：
+    下一轮要做「10 个人各按自己的阈值收不同的日报」时，
+    推送入口只需要开始传这个参数，调用方签名不用再改一遍。
+
+    为什么收 `int | str`：面板传的是 header 里的字符串，脚本传的是 int。
+    在这里做兜底解析比让每个调用方各自 int() 一次更省事，也少一处不一致。
+
+    也正因如此，本轮**不要**在这里读 `settings_store` 的个人覆盖——
+    定时采集/日报是系统行为，没有自然人（见 DESIGN 待确认 #2）。
+    """
     tenant_id = tenant_id or settings.tenant_id
     since = datetime.now() - timedelta(hours=hours)
 
@@ -215,6 +232,7 @@ def build_daily_brief(
             level=sig.level,
             description=sig.description,
             competitor_id=comp.id,
+            detected_at=sig.detected_at,
         )
         _attach_action(item, sig, comp, my, oos_comps)
 
@@ -440,6 +458,7 @@ def build_alerts_since(tenant_id: str, minutes: int = 90) -> list[BriefItem]:
                 level=sig.level,
                 description=sig.description,
                 competitor_id=comp.id,
+                detected_at=sig.detected_at,
             )
             _attach_action(item, sig, comp, my, oos_comps)
             out.append(item)

@@ -1,6 +1,7 @@
-"""初始化脚本：建库、建表、建租户。
+"""初始化脚本：建库、建表、跑幂等迁移、建租户与默认用户。
 
-幂等，可以反复跑。
+幂等，可以反复跑。第 2 次起「迁移已应用」必须是空列表 —— 这是迁移幂等的证据，
+不是日志噪音，所以这里**无条件打印**（而不是只在非空时打）。
     python scripts/init_db.py
     python scripts/init_db.py --asin B0XXXXXXXX    # 顺便把自家 ASIN 一起建好
 """
@@ -23,16 +24,24 @@ def main() -> None:
     parser.add_argument("--asin", default="", help="自家 ASIN（可选）")
     args = parser.parse_args()
 
-    init_db()
-    print(f"[1/3] 数据表已就绪：{settings.database_url}")
+    applied = init_db()
+    print(f"[1/4] 数据表已就绪：{settings.database_url}")
+    print(f"      迁移已应用：{applied}")
 
     with get_session() as s:
         tenant = s.get(Tenant, settings.tenant_id)
         if tenant is None:
             s.add(Tenant(id=settings.tenant_id, name=settings.tenant_name))
-            print(f"[2/3] 已创建租户：{settings.tenant_id}（{settings.tenant_name}）")
+            print(f"[2/4] 已创建租户：{settings.tenant_id}（{settings.tenant_name}）")
         else:
-            print(f"[2/3] 租户已存在：{settings.tenant_id}")
+            print(f"[2/4] 租户已存在：{settings.tenant_id}")
+
+    # 默认用户：动作记录必须有「谁做的」，一条都没有的话面板上录动作会留空。
+    # 放在这里而不是 import 时自动建，是为了让「建库」这件事只有显式入口能触发。
+    from app.services.identity import ensure_default_user
+
+    user = ensure_default_user()
+    print(f"[3/4] 默认用户：#{user['id']} {user['name']}（{user['role']}）")
 
     with get_session() as s:
         from sqlalchemy import select
@@ -48,9 +57,9 @@ def main() -> None:
                     marketplace="US",
                 )
             )
-            print(f"[3/3] 已创建自家产品记录（ASIN={args.asin.upper() or '待填'}）")
+            print(f"[4/4] 已创建自家产品记录（ASIN={args.asin.upper() or '待填'}）")
         else:
-            print(f"[3/3] 自家产品已存在（ASIN={my.asin or '待填'}）")
+            print(f"[4/4] 自家产品已存在（ASIN={my.asin or '待填'}）")
 
     print("")
     print("下一步：")
