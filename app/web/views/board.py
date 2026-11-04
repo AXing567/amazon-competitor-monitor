@@ -9,6 +9,12 @@
 所以这一屏会把 `tier_missing`（缺流量词 / 缺类目路径）直接摊开写，
 让人知道"等数据补齐就会自动判"——这是把内部状态翻译成用户能行动的句子。
 
+**「暂定」与「待判定」是两层，别混**：`tier_provisional` 的行**已经有字母档**，
+只是定档所需的维度没测全，文案是「暂定，缺：X」；`unknown` 的行连字母档都没有，
+文案是「缺：X」。混成一句的后果是：一个 B 级竞品下面写着「待判定」，
+用户以为分层没做出来，回头又去手工归档——同一个格子里两种口径，
+比少显示一行信息糟得多。判据只用 `tier_provisional` 布尔位，不解析标签文案。
+
 ## 为什么四张数字卡各自容错
 
 「数据健康度」那张卡依赖 `/api/panel/health`。如果健康接口挂了，
@@ -82,9 +88,23 @@ register('board', async () => {
   const rows = items.map(it => {
     const bf = it.battlefield || {};
     const lc = it.last_change;
+    // 这一栏两种来源，措辞不许分叉（与池子页同一件事的两种呈现）：
+    //   tier_provisional → 「暂定，缺：X」——已经有字母档，只是定档所需的维度没测全；
+    //   其余（unknown）  → 「缺：X」——连字母档都还没有。
+    // 判据只用 API 的 `tier_provisional` 布尔位，不解析 `tier_label` 里的括号：
+    // 文案一改解析就静默失效，失效的表现就是把「暂定」又读成「待判定」。
+    //
+    // 缺的那一维，暂定行用短名（`tier_reasons.missing_dims` 的英文键 → 中文），
+    // 与池子页「缺的是流量词重合」同一套词；unknown 行沿用能力层给的长说明，
+    // 因为那里要带上"为什么缺"（快照里没有 keywords / 锚点缺 category_path）。
+    const dimZh = {price_ratio: '价格带', keyword_overlap: '流量词重合', node_match: '类目节点'};
+    const lackShort = ((it.tier_reasons || {}).missing_dims || []).map(d => dimZh[d] || d);
+    const missText = (it.tier_provisional === true && lackShort.length)
+      ? lackShort.join('、')
+      : (it.tier_missing || []).join('、');
     const miss = (it.tier_missing || []).length
-      ? '<div class="dim" style="font-size:11.5px;line-height:1.6">缺：' +
-        esc((it.tier_missing || []).join('、')) + '</div>'
+      ? '<div class="dim" style="font-size:11.5px;line-height:1.6">' +
+        (it.tier_provisional === true ? '暂定，缺：' : '缺：') + esc(missText) + '</div>'
       : '';
     // 暂停采集的竞品必须自己说出来。
     // 不标的话，它会安静地待在看板里、last_checked_at 越来越旧，而「最近变化」那一栏

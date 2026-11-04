@@ -469,3 +469,27 @@ def test_pool_view_splits_provisional_from_unknown():
                   "label.indexOf", "label.includes"):
         assert parse not in src, f"前端开始解析标签文案（{parse}）——文案一改就静默失效"
 
+
+def test_board_view_says_provisional_not_pending():
+    """看板页同一件事的措辞不许分叉：暂定行说「暂定，缺：」，其余行说「缺：」。
+
+    两处分开写是刻意的（一个是主屏、一个是池子管理），但**事实只有一个**：
+    暂定行已经有字母档，只是定档所需的维度没测全，不能读成「待判定」。
+    判据同样是 `tier_provisional` 布尔位；缺的那一维也走同一套短名
+    （「流量词重合」），否则它在同一个格子里会读成「暂定，缺：缺流量词（…）」。
+    """
+    from app.web.views import board as board_view
+
+    src = board_view.js()
+
+    assert "'暂定，缺：' : '缺：'" in src, (
+        "看板页没有区分「暂定」与「缺」——暂定行会读成「缺：缺流量词（…）」，"
+        "且看不出这一档只是暂定的"
+    )
+    assert "it.tier_provisional === true" in src, "判据必须是 tier_provisional 布尔位"
+    # 短名映射与池子页同一套词；unknown 行的长说明（带"为什么缺"）必须保留兜底
+    assert "keyword_overlap: '流量词重合'" in src
+    assert "(it.tier_missing || []).join('、')" in src
+    for parse in ("tier_label.indexOf", "tier_label.includes", "tier_label.match"):
+        assert parse not in src, f"看板页开始解析标签文案（{parse}）"
+
