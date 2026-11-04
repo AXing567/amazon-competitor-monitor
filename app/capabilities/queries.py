@@ -113,6 +113,10 @@ def _tier_label(tier: str, tier_reasons: Optional[dict] = None) -> str:
 
     dims = [d for d in _DIM_ORDER if d in (reasons.get("missing_dims") or [])]
     short = [_DIM_SHORT_LABELS.get(d, d) for d in dims] or ["关键维度"]
+    # 抽样太薄和「压根没采到」是两件事，标签上分开：
+    # 「缺词重合」让人去查采集（那里没问题），「词库抽样薄」才指向真正的原因。
+    if reasons.get("keyword_sample_thin") and len(dims) == 1:
+        return f"{tier} 级（暂定：词库抽样薄）"
     # 暂定时**不再报相关度定性**（「强相关」/「弱相关」）：那两个词描述的是词重合这一维，
     # 而词重合恰恰就是缺的那一维。原样保留会出现「A 级 · 强相关（暂定：缺词重合）」——
     # 一句话里同时说「强相关」和「不知道相不相关」，读的人只会记住前半句。

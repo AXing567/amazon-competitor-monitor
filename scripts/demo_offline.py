@@ -278,6 +278,29 @@ _DEMO_KW_BY_TIER: dict[str, list[str]] = {
 #: 体量：S/A 要和自家的日均销量咬合（0.8x~2.5x），否则算法会把它降成 A。
 _DEMO_UNITS_BASE: dict[str, int] = {"S": 1250, "A": 1150, "B": 1000, "C": 600}
 
+#: C 级的词表要**补到这个长度**才够说「判过了，不重合」。
+#:
+#: 为什么不能只给两个不相干的词：`calc_keyword_overlap` 有一条守卫——
+#: 样本薄于 `THIN_SAMPLE_MIN_WORDS` 时，重合 0 一律返回 None（「判不了」），
+#: 因为上游每个 ASIN 只回一页（20 条），而真实词库可以到上千。
+#: 演示若要展示「真的不重合」这个结论，就得给出足够厚的样本，
+#: 否则它演示的其实是「样本太薄」——两者在面板上长得一样，但含义相反。
+_DEMO_C_SAMPLE_SIZE = 60
+
+
+def _pad_unrelated(words: list[str], size: int) -> list[str]:
+    """把词表补到 `size` 条，补的全是和自家核心词无关的短语。
+
+    只影响「样本厚度」，不影响重合度：这些词一个都不在自家核心词里，
+    所以加权命中仍然是 0——但 0 现在有资格作数了。
+    """
+    out = list(words)
+    i = 0
+    while len(out) < size:
+        out.append(f"unrelated kitchen gadget {i}")
+        i += 1
+    return out
+
 
 def _demo_keywords(scen: dict) -> Optional[list[dict]]:
     """按层级给一套词。`unknown` 返回 None（这条演示的就是"没数据"）。"""
@@ -285,6 +308,8 @@ def _demo_keywords(scen: dict) -> Optional[list[dict]]:
     picked = _DEMO_KW_BY_TIER.get(tier)
     if not picked:
         return None
+    if tier == "C":
+        picked = _pad_unrelated(picked, _DEMO_C_SAMPLE_SIZE)
     share = 0.34
     out: list[dict] = []
     for i, word in enumerate(picked):

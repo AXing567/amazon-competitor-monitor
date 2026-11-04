@@ -107,6 +107,7 @@ def build_basis_summary(
 
     overlap = reasons.get("keyword_overlap")
     if overlap is None:
+        thin = bool(reasons.get("keyword_sample_thin"))
         if provisional:
             # 「没测」不是「测了偏低」。缺哪几维、这一档是凭什么暂定的，
             # 都由判定当时记录的 `missing_dims` 决定，不在这里另猜一份。
@@ -117,8 +118,18 @@ def build_basis_summary(
             ]
             kept = [dim for dim in DIM_ORDER if dim not in missing]
             lack = "、".join(tiering_mod.missing_dim_labels(missing)) or "关键维度"
+            if thin:
+                # 有词，只是样本薄。写成「缺流量词」会把人送去查采集（那里没问题）。
+                wc = reasons.get("keyword_word_count")
+                head = (
+                    f"竞品词库只抽到 {wc} 个词（上游每个 ASIN 只回一页），词重合算不出结论"
+                    if wc
+                    else "竞品词库抽样过薄，词重合算不出结论"
+                )
+            else:
+                head = f"缺{lack}，词重合未测"
             parts.append(
-                f"缺{lack}，词重合未测"
+                f"{head}"
                 f"（这一档是按{'、'.join(tiering_mod.missing_dim_labels(kept)) or '其余维度'}暂定的）"
             )
         else:

@@ -24,6 +24,19 @@ OVERLAP_A = 0.40               # A 级门槛
 OVERLAP_B = 0.20               # B 级门槛
 CORE_COVERAGE = 0.80           # 核心词池覆盖的流量比例（当前未被消费，仍要进 SPEC）
 
+#: 竞品词库抽样薄到什么程度时，「重合 0」不算结论。
+#:
+#: 两条判据，命中任一即视为「抽样太薄」：
+#:   ① `拿到的词数 < THIN_SAMPLE_MIN_WORDS`；
+#:   ② 已知词库总量时，`拿到的词数 × THIN_SAMPLE_RATIO < 词库总词数`（不到 1/3）。
+#:
+#: 为什么需要 ① 而不只靠比例：上游每个 ASIN 只回一页（实测都是 20 条），
+#: 而「词库总量」这个字段有时拿不到。只靠比例的话，总量缺失时守卫整个失效，
+#: 于是又回到「用一页样本否定一个上千词的词库」。
+#: 50 这个门槛的含义：一页 20 条永远过不了，两页以上才有资格说「他没有这个词」。
+THIN_SAMPLE_RATIO = 3
+THIN_SAMPLE_MIN_WORDS = 50
+
 #: 三个维度的固定顺序。`missing_dims` 与各项文案都按这个顺序输出，
 #: 免得同一份数据在两次运行里长出两种排列、让 diff 和面板看起来在抖。
 DIM_ORDER: tuple[str, ...] = ("price_ratio", "keyword_overlap", "node_match")
@@ -49,14 +62,35 @@ def calc_price_ratio(my_price: Optional[float], comp_price: Optional[float]) -> 
     return round(comp_price / my_price, 4)
 
 
+def is_thin_keyword_sample(word_count: int, total: int | None) -> bool:
+    """这次词库抽样够不够下「他没有这个词」的结论。
+
+    两条判据任一命中即为「太薄」：条数少于 `THIN_SAMPLE_MIN_WORDS`，
+    或者已知总量且抽样不到 1/3。`total` 缺失时只靠条数——总比整个失效好。
+
+    放在这里而不是塞进 `calc_keyword_overlap`：判定（重合多少）和
+    「这个数能不能作数」是两件事，后者在 `judge_tier` 里还要用来选文案。
+    """
+    if word_count <= 0:
+        return False
+    if word_count < THIN_SAMPLE_MIN_WORDS:
+        return True
+    if total and word_count * THIN_SAMPLE_RATIO < total:
+        return True
+    return False
+
+
 def calc_keyword_overlap(
     my_core: dict[str, float],
     comp_keywords: list[dict] | set[str],
+    comp_total: int | None = None,
 ) -> Optional[float]:
     """加权出单词重合度。
 
     my_core:    {keyword: trafficPercentage}，已截取累计 80% 的头部词
     comp_keywords: 竞品词列表（dict）或词集合（str）
+    comp_total: 竞品词库的**总词数**（上游给的 `traffic_keywords_total`）。
+                只用来判断「这次抽样够不够下否定结论」，见下面 THIN_SAMPLE_RATIO。
 
     返回 0~1 的浮点，或 None（数据不足）。
     """
@@ -76,7 +110,23 @@ def calc_keyword_overlap(
         return None
 
     hit = sum(w for kw, w in my_core.items() if kw in comp_set)
-    return round(hit / total, 4)
+    overlap = round(hit / total, 4)
+
+    # ---- 抽样太薄时，0 不是结论 ----
+    #
+    # 命中 > 0 是**正面证据**：竞品样本里确实出现了锚点的主力词，抽样再薄也说明它抢这个词。
+    # 命中 == 0 则是**缺席证据**，而缺席在薄样本里几乎必然发生：
+    # 上游每个 ASIN 只返回 20 个词，而真实词库可以到 2000+（实测 2016），
+    # 20/2016 的抽样里没撞上那两三个主力词，是概率问题，不是竞争关系问题。
+    #
+    # 实测：32 个同节点、月销上千的竞品里，28 个算出来是 0——
+    # 如果照这个数判档，等于用 1% 的抽样把真实对手全部降级。
+    # 这类「看起来是证据的字段」正是本项目最贵的一类 bug，所以这里宁可返回 None
+    # （下游据此标「暂定」），也不返回一个会直接改档位的 0。
+    if overlap == 0 and is_thin_keyword_sample(len(comp_set), comp_total):
+        return None
+
+    return overlap
 
 
 def judge_tier(
@@ -108,8 +158,26 @@ def judge_tier(
     )
 
     # ---- 同 2：流量池 ----
-    res.keyword_overlap = calc_keyword_overlap(my_core_keywords, comp.keywords)
+    #
+    # 传 `comp_total`：竞品词库总量 vs 我们实际拿到的条数。
+    # 上游一次只给 20 个词，而真实 listing 动辄上千个（实测 Kitsure 2016 个，
+    # 只取到 20 个 = 1% 抽样）。在 1% 的样本上算出「重合 0」，含义是
+    # 「这一千个词里恰好没有锚点那两三个」，**不是**「他们不抢同一个词」。
+    # 不传这个数的时候（老调用方、单测）行为完全不变。
+    res.keyword_overlap = calc_keyword_overlap(
+        my_core_keywords,
+        comp.keywords,
+        comp_total=getattr(comp, "traffic_keywords_total", None),
+    )
     keyword_ok = res.keyword_overlap is not None and res.keyword_overlap >= th.keyword_overlap_gate
+
+    # 「没采到词」和「采到了但样本太薄」在数据上都表现为 `keyword_overlap is None`，
+    # 但要对人说不一样的话：前者要人去查采集，后者要人去查上游的返回条数上限。
+    comp_word_count = len(comp.keywords or [])
+    sample_thin = bool(
+        res.keyword_overlap is None
+        and is_thin_keyword_sample(comp_word_count, comp.traffic_keywords_total)
+    )
 
     # ---- 同 3：功能形态（自动判不了，留给人工） ----
     res.functional_match = functional_match
@@ -135,6 +203,10 @@ def judge_tier(
         "price_band_ok": price_ok,
         "keyword_overlap": res.keyword_overlap,
         "keyword_pool_ok": keyword_ok,
+        # 采样太薄导致重合算不出时，缺的那一维**不是**「没采到」。
+        # 面板/理由要能分开：前者查采集，后者查上游返回条数。
+        "keyword_sample_thin": sample_thin,
+        "keyword_word_count": comp_word_count,
         "node_match": res.node_match,
         "functional_match": res.functional_match,
         "functional_note": (
@@ -205,7 +277,9 @@ def judge_tier(
     )
     if res.keyword_overlap is None and not res.tier_reasons["black_horse"]:
         res.provisional = True
-        res.provisional_reason = provisional_reason(res.missing_dims)
+        res.provisional_reason = provisional_reason(
+            res.missing_dims, sample_thin=sample_thin, word_count=comp_word_count
+        )
 
     # 允许前面出现过的「暂定」被证明是误标（例如未来补上词维度后不走那一支）
     res.tier_reasons["provisional"] = res.provisional
@@ -268,15 +342,33 @@ def missing_dim_labels(missing: list[str] | None) -> list[str]:
     return [DIM_LABELS.get(dim, dim) for dim in (missing or [])]
 
 
-def provisional_reason(missing: list[str] | None) -> str:
+def provisional_reason(
+    missing: list[str] | None, sample_thin: bool = False, word_count: int | None = None
+) -> str:
     """一句话说明「为什么这一档只是暂定」，可直接上屏。
 
     措辞必须把「没测」和「测了不重合」分开：写成「词重合较低」会让用户
     以为我们评估过这个对手的流量池，实际连他的出单词都没拿到。
+
+    `sample_thin` 是第三种情况，比前两种更隐蔽：**词拿到了，但只拿到一小撮**。
+    这时候说「缺流量词」会把人送去查采集（那里没问题），而真正该查的是
+    上游每个 ASIN 只回 20 个词这件事。所以它必须有自己的一句话。
     """
     dims = [dim for dim in DIM_ORDER if dim in (missing or [])]
-    lack = "、".join(missing_dim_labels(dims)) or "关键维度"
     kept = "、".join(missing_dim_labels([d for d in DIM_ORDER if d not in dims])) or "其余维度"
+
+    if sample_thin and "keyword_overlap" in dims:
+        got = f"只拿到 {word_count} 个词" if word_count else "只拿到一小撮词"
+        others = [d for d in dims if d != "keyword_overlap"]
+        lack_tail = (
+            f"、{('、'.join(missing_dim_labels(others)))}" if others else ""
+        )
+        return (
+            f"竞品词库抽样过薄（{got}，上游每个 ASIN 只回一页），"
+            f"词重合算不出结论{lack_tail}：这一档是按{kept}暂定的"
+        )
+
+    lack = "、".join(missing_dim_labels(dims)) or "关键维度"
     return (
         f"缺{lack}（没测出来，不是测了不重合）："
         f"这一档是按{kept}暂定的，不能据此判断重合深浅"
@@ -333,7 +425,14 @@ def _reject_reason(
     """
     parts = []
     if res.keyword_overlap is None:
-        parts.append("缺少流量词数据，无法计算重合度")
+        if res.tier_reasons.get("keyword_sample_thin"):
+            # 有词，只是太少。说「缺流量词」会把人送去查采集，方向是错的。
+            parts.append(
+                f"竞品词库抽样过薄（只拿到 {res.tier_reasons.get('keyword_word_count')} 个词），"
+                f"重合度无法计算"
+            )
+        else:
+            parts.append("缺少流量词数据，无法计算重合度")
     elif not keyword_ok:
         parts.append(
             f"词重合度 {res.keyword_overlap:.1%} 低于 {th.keyword_overlap_gate:.0%} 门槛"
