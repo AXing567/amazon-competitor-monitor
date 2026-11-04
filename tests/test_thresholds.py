@@ -1100,8 +1100,22 @@ def test_pool_maintenance_skips_when_evidence_missing():
         asyncio.run(scheduler_mod.job_pool_maintenance())
 
     assert _tiers() == before, f"证据不足时不许改判：{before} → {_tiers()}"
-    assert any("跳过" in line for line in logs), logs
-    assert any("类目路径缺失" in line for line in logs), logs
+
+    # 断言钉在**行为**上：被跳过的竞品必须在日志里被点名，不许静默跳过。
+    # 原来这里钉的是措辞（`"类目路径缺失" in line`），而那句话描述的数据缺口
+    # 早就补上了（snapshots.keywords / my_products.category_path 都已落库），
+    # 文案一改成按实际判据描述，用例就会「因为文字变了」而假红——
+    # 那不是这条用例想守的东西。
+    skip_lines = [line for line in logs if "跳过" in line]
+    assert skip_lines, f"证据不足时没有任何跳过日志（等于静默跳过）：{logs}"
+    named = "".join(skip_lines)
+    assert CMP_A in named, f"被跳过的竞品没有被点名：{skip_lines}"
+    assert CMP_B in named, f"被跳过的竞品没有被点名：{skip_lines}"
+    # 但仍要钉住「原因是可判维度不足」这层语义：日志必须能让人知道该补什么，
+    # 而不是一句「跳过了」了事。
+    assert any("维度" in line for line in skip_lines), [
+        f"跳过原因没说清判据（可判维度 < 2）：{line}" for line in skip_lines
+    ]
 
 
 def test_pool_public_contract_unchanged():

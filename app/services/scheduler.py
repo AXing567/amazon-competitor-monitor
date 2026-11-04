@@ -170,7 +170,7 @@ async def job_pool_maintenance() -> None:
 
     if skipped:
         logger.info(
-            "本轮 %d 个竞品因证据不足跳过重分层（keywords 未落库 / 类目路径缺失）：%s",
+            "本轮 %d 个竞品因可判维度不足（能判的维度 < 2）跳过重分层：%s",
             len(skipped),
             "、".join(skipped[:10]) + ("…" if len(skipped) > 10 else ""),
         )

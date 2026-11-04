@@ -233,7 +233,7 @@ def add_competitor(
         thresholds=settings_store.resolve_tiering_thresholds(tenant_id, my_id),
     )
 
-    # 证据不足（keywords 未落库 / 类目路径缺失）时**不拒**：
+    # 证据不足（能判的维度 < 2）时**不拒**：
     # 拿不到证据 ≠ 证据表明不是竞品。放进来标成 unknown（待判定），
     # 等数据补齐后由周维护正常改判；拒之门外则永远没有补数据的机会。
     if not res.passed and not force and not res.insufficient:
