@@ -291,20 +291,59 @@ def simulate_thresholds(
 # ============================================================
 
 
-def explain_thresholds(ctx: CapContext, group_name: str) -> dict:
+#: 个人层**不生效**的分组。这些组决定的是「信号/分层到底存不存在」——全局唯一的事实，
+#: 一轮采集只跑一遍（100 个竞品≈25 分钟、受数据源额度约束），不可能按人各跑一套。
+#: 个人差异的正确落点是 `notify`（决定「这条信号要不要推给这个人」），不是这里。
+GROUP_USER_LAYER_EXCLUDED: tuple[str, ...] = ("diff", "tiering")
+
+
+def explain_thresholds(
+    ctx: CapContext,
+    group_name: str,
+    my_product_id: Optional[int] = None,
+) -> dict:
     """把「当前生效阈值」翻译成一段人话，供面板空态/帮助气泡展示。
 
     这里没有任何判断：只是把 SPEC 的中文标签 + 生效值 + 来源层拼起来。
     之所以要有它，是因为面板上如果只显示一串数字，老板不会知道
     `price_p1_pct = 0.03` 到底意味着「降 3% 会进日报」还是「会推送飞书」。
+
+    ## 为什么 diff / tiering 组要剔掉个人层（D5 的第二个出口）
+
+    原来这里一律 `resolve(tenant, user_id=ctx.user_id)`，于是只要库里有一条
+    `scope="user"` 的 diff 覆盖，就会输出「价格 P0 阈值：0.03（来自个人覆盖）」，
+    而标题写的是「当前生效」——但 diff 组的个人层**根本不生效**（生产采集只读
+    company + product）。这和 D5 是同一个谎，只是换了出口：试算已经不说谎了，
+    这段人话还在说谎，而它正是面板拿来当帮助文案的。
+
+    所以：`diff` / `tiering` 里被个人层接管的键，**回落到下一层**（company / default）
+    并在 `personal_overrides_not_applied` 里单列出来，别让它们静默消失；
+    `notify` 组**保留**个人层（它才是个人差异该落的地方）。
     """
     if group_name not in GROUPS:
         return {"ok": False, "error": f"group_name 只能是 {'/'.join(GROUPS)}，收到 {group_name!r}"}
 
     uid = ctx.user_id
-    values, sources = settings_store.resolve(ctx.tenant_id, user_id=uid)
-    current = values.get(group_name) or {}
-    source = sources.get(group_name) or {}
+    values, sources = settings_store.resolve(
+        ctx.tenant_id, user_id=uid, my_product_id=my_product_id
+    )
+    current = dict(values.get(group_name) or {})
+    source = dict(sources.get(group_name) or {})
+
+    # ---- 剔掉不生效的个人层（只对 diff / tiering）----
+    personal_overrides_not_applied: list[dict] = []
+    if group_name in GROUP_USER_LAYER_EXCLUDED and uid is not None:
+        base_values, base_sources = settings_store.resolve(
+            ctx.tenant_id, my_product_id=my_product_id      # 故意不传 user_id
+        )
+        base_group = base_values.get(group_name) or {}
+        base_group_sources = base_sources.get(group_name) or {}
+        for key, layer in list(source.items()):
+            if layer != "user":
+                continue
+            personal_overrides_not_applied.append({"key": key, "value": current.get(key)})
+            current[key] = base_group.get(key, current.get(key))
+            source[key] = base_group_sources.get(key, "default")
 
     lines = [f"{GROUP_TITLES.get(group_name, group_name)}（当前生效）"]
     for item in spec_items(group_name):
@@ -320,12 +359,32 @@ def explain_thresholds(ctx: CapContext, group_name: str) -> dict:
         lines.append("")
         lines += [f"⚠ {n}" for n in notes]
 
+    if personal_overrides_not_applied:
+        labels = {item.key: item.label for item in spec_items(group_name)}
+        detail = "、".join(
+            f"{labels.get(o['key'], o['key'])} {o['value']}"
+            for o in personal_overrides_not_applied
+        )
+        title = GROUP_TITLES.get(group_name, group_name)
+        lines.append("")
+        lines.append(
+            f"⚠ 你有 {len(personal_overrides_not_applied)} 项个人覆盖（{detail}）"
+            f"不参与{title}的判断——{title}对所有人生效的是同一套阈值，"
+            "个人层只影响「打扰节奏」（这条信号要不要推给你）。"
+            f"想让 {personal_overrides_not_applied[0]['value']} 真正生效，"
+            "请改产品层或公司层。"
+        )
+
     return {
         "ok": True,
         "group_name": group_name,
         "group_title": GROUP_TITLES.get(group_name, group_name),
+        "my_product_id": my_product_id,
         "effective": current,
         "sources": source,
+        # `notify` 组传了个人层就是真的生效，这里如实标出来
+        "personal_layer_applied": uid is not None and group_name not in GROUP_USER_LAYER_EXCLUDED,
+        "personal_overrides_not_applied": personal_overrides_not_applied,
         "warnings": notes,
         "lines": lines,
         "text": "\n".join(lines),
@@ -446,6 +505,8 @@ CAPABILITIES: tuple[Capability, ...] = (
         description="把当前生效阈值翻译成人话，说明每个值意味着什么、来自哪一层。",
         params=(
             _p("group_name", "阈值分组", T_ENUM, required=True, enum=list(GROUPS)),
+            _p("my_product_id", "自家产品 ID", T_INT, minimum=1,
+               help="不传则看不到产品层覆盖"),
         ),
         handler=explain_thresholds,
     ),

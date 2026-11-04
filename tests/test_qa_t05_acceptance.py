@@ -620,6 +620,53 @@ def test_explicit_user_id_still_works():
     assert res["thresholds"]["current"]["price_p0_pct"] == 0.09, res["thresholds"]["current"]
 
 
+def test_explain_does_not_present_user_layer_as_effective():
+    """人话说明也不许把个人层说成「当前生效」（D5 的第二个出口）。
+
+    `manifest`：库里有一条 user 层 diff 覆盖 `price_p0_pct=0.03`，公司层是 0.05。
+    判定实际用 0.05，所以说明里一旦出现「0.03（来自个人覆盖）」+ 标题「当前生效」，
+    用户就会以为「系统按我的 3% 在判」——这跟试算那个谎是同一个，只是换了出口。
+
+    同时要防止修法过头：`notify` 组**必须**照常计入个人层（个人差异该落的地方），
+    所以下面两段断言成对出现。
+    """
+    from app.capabilities.judgments import explain_thresholds
+    from app.capabilities.types import SOURCE_PANEL, CapContext
+    from app.services import settings_store
+
+    tenant, _product_id, uid = _d5_seed("explain", company_price=0.05, user_price=0.03)
+    ctx = CapContext(tenant_id=tenant, user_id=uid, source=SOURCE_PANEL)
+
+    # ---- diff：个人层被剔掉，回落到公司层 ----
+    diff = explain_thresholds(ctx, "diff")
+    assert diff["ok"] is True, diff
+    assert "0.03（来自个人覆盖）" not in diff["text"], diff["text"]
+    assert diff["effective"]["price_p0_pct"] == 0.05, diff["effective"]
+    assert diff["sources"]["price_p0_pct"] == "company", diff["sources"]
+    assert diff["personal_layer_applied"] is False, diff
+    assert len(diff["personal_overrides_not_applied"]) == 1, diff["personal_overrides_not_applied"]
+    first = diff["personal_overrides_not_applied"][0]
+    assert (first["key"], first["value"]) == ("price_p0_pct", 0.03), first
+    # 不许静默剔除：人话里要有一句提示，让用户知道"我设的 3% 没生效、为什么"
+    assert "不参与" in diff["text"], diff["text"]
+    assert "0.03" in diff["text"], diff["text"]
+
+    # ---- notify：个人层正常计入（防一刀切）----
+    saved = settings_store.save(
+        scope="user", scope_id=str(uid), group_name="notify",
+        values={"cooldown_p0_hours": 12}, tenant_id=tenant,
+    )
+    assert saved["ok"] is True, saved
+
+    notify = explain_thresholds(ctx, "notify")
+    assert notify["ok"] is True, notify
+    assert notify["effective"]["cooldown_p0_hours"] == 12, notify["effective"]
+    assert notify["sources"]["cooldown_p0_hours"] == "user", notify["sources"]
+    assert notify["personal_layer_applied"] is True, notify
+    assert notify["personal_overrides_not_applied"] == [], notify
+    assert "12 小时（来自个人覆盖）" in notify["text"], notify["text"]
+
+
 def _peek_anchor(path: Path) -> dict:
     conn = sqlite3.connect(path)
     try:

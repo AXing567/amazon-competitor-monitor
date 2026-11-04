@@ -272,11 +272,16 @@ async def api_simulate_thresholds(
 @router.get("/api/config/thresholds/explain")
 async def api_explain_thresholds(
     group_name: Optional[str] = None,
+    my_product_id: Optional[int] = None,
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> Any:
     """把当前生效阈值翻译成一段人话（面板空态/帮助气泡用）。
 
     `group_name` 不传默认 `diff`——理由同 `/versions`：裸 curl 也应该 200。
+
+    `my_product_id` 要带上，否则说明里看不到产品层覆盖（只显示到公司层）。
+    个人层**只在 notify 组**计入；diff / tiering 组会被显式剔掉并在返回里单列
+    `personal_overrides_not_applied`——那两组对所有人生效的是同一套阈值。
     """
     ctx = resolve_ctx(x_user_id, source=SOURCE_PANEL)
     return _json(
@@ -285,5 +290,6 @@ async def api_explain_thresholds(
             "explain_thresholds",
             ctx=ctx,
             group_name=(group_name or "diff").strip().lower(),
+            my_product_id=my_product_id,
         )
     )
