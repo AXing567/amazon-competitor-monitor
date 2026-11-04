@@ -493,7 +493,11 @@ _TIERING_ROWS: tuple[dict[str, Any], ...] = (
         unit="比例",
         minimum=0.0,
         maximum=1.0,
-        help="轻度重合，相邻战场",
+        # 措辞与面板标签（`queries.TIER_LABELS["B"]`「B 级 · 弱相关」）保持一致。
+        # 不写「轻度重合」：B 的达线条件只有这一条词重合下限，价格带与体量都不设门槛，
+        # 而且词维度没测出来时也会落到 B（暂定档）——说成「轻度重合」等于替一个
+        # 没测过的维度作证。
+        help="弱相关，相邻战场",
     ),
     dict(
         key="core_coverage",

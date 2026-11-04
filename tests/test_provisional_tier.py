@@ -431,3 +431,41 @@ def test_provisional_tier_still_respects_thresholds():
     # 但缺失维度照样要记录：它是数据问题，不因结论是 C 而消失
     assert res.missing_dims == ["keyword_overlap"]
     assert res.reject_reason
+
+
+# ============================================================
+# ⑦ 面板渲染：三层口径不许混成两层
+# ============================================================
+
+
+def test_pool_view_splits_provisional_from_unknown():
+    """竞品池页的缺失说明必须分三层：暂定 / 待判定 / 不显示。
+
+    混成两层的后果已经出现过一次：一个「B 级 · 弱相关（暂定：缺词重合）」的竞品，
+    下面却挂着一句「待判定是因为缺证据：缺流量词…」——同一行里两种矛盾的口径，
+    用户会以为分层没做出来。这属于「系统说的话自相矛盾」，和本轮修掉的那族 bug 同源。
+
+    判据必须是 API 给的 `tier_provisional` 布尔位，**不许**前端去解析
+    `tier_label` 里的「（暂定：…）」括号：文案一改，解析就静默失效，
+    而失效的表现恰好就是把两层混回去。
+    """
+    from app.web.views import pool as pool_view
+
+    src = pool_view.js()
+
+    # 1) 暂定档单独一支，且说的是「有字母档、只是暂定」
+    assert "it.tier_provisional === true" in src, "池子页没有按 tier_provisional 分支"
+    assert "· 暂定：缺的是" in src, "暂定档没有自己的说法"
+    assert "最能兜住的中间档" in src, "暂定档要说明这一档是怎么给的"
+
+    # 2) 待判定那一支还在，且只属于 unknown
+    assert "it.tier === 'unknown'" in src
+    assert "待判定是因为缺证据：" in src
+    # 暂定必须排在 unknown 之前判定：顺序反了就先命中「待判定」，暂定永远轮不到
+    assert src.index("it.tier_provisional === true") < src.index("待判定是因为缺证据：")
+
+    # 3) 防回退：不许解析标签里的括号
+    for parse in ("tier_label.indexOf", "tier_label.includes", "tier_label.match",
+                  "label.indexOf", "label.includes"):
+        assert parse not in src, f"前端开始解析标签文案（{parse}）——文案一改就静默失效"
+

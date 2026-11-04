@@ -103,11 +103,32 @@ function poolRow(it){
     reasons.push('功能' + (it.functional_match ? '相同 ✓' : '不同 ✗'));
   if (!reasons.length) reasons.push('<span class="dim">暂无判定记录</span>');
 
-  const miss = (it.tier_missing || []).length
-    ? '<div class="dim" style="font-size:11.5px;line-height:1.65;margin-top:4px">' +
+  // 缺失维度的说明必须分**三层**，不许把「暂定」与「待判定」混成一句：
+  //   暂定（tier_provisional === true）   = 已经有字母档，只是定档所需的维度没测全；
+  //   待判定（tier === 'unknown'）        = 能判维度 < 2，连字母档都还没有；
+  //   其余                                = 正常结论，这一栏不显示。
+  // 混成两层的后果：一个 B 级竞品下面挂一句「待判定是因为缺证据」，
+  // 用户会以为分层没做出来，回头又去手工归档——这正是本轮要修掉的那种自相矛盾。
+  //
+  // 判据只用 API 给的 `tier_provisional` 布尔位，**不**去解析 `tier_label` 里的
+  // 「（暂定：缺X）」括号：文案一改解析就静默失效，而失效的表现恰好就是两层混掉。
+  const dimZh = {price_ratio: '价格带', keyword_overlap: '流量词重合', node_match: '类目节点'};
+  const lack = (r.missing_dims || []).map(d => dimZh[d] || d);
+  // 老数据没有 `missing_dims`（判定早于本轮），退回能力层算好的中文缺失项
+  const lackText = lack.length ? lack.join('、') : (it.tier_missing || []).join('、');
+  const missStyle = 'font-size:11.5px;line-height:1.65;margin-top:4px';
+  let miss = '';
+  if (it.tier_provisional === true) {
+    miss = '<div class="dim" style="' + missStyle + '" title="' +
+      esc((it.tier_missing || []).join('；')) + '">' +
+      '分层 <b>' + esc(it.tier || '—') + '</b> · 暂定：缺的是' + esc(lackText || '关键维度') +
+      '，这一档是按最能兜住的中间档给的。' +
+      '<br>补齐之后池子维护会自动改判，不用手工干预。</div>';
+  } else if (it.tier === 'unknown') {
+    miss = '<div class="dim" style="' + missStyle + '">' +
       '待判定是因为缺证据：' + esc((it.tier_missing || []).join('、')) +
-      '<br>数据补齐后池子维护会自动改判，不用手工干预。</div>'
-    : '';
+      '<br>数据补齐后池子维护会自动改判，不用手工干预。</div>';
+  }
 
   // 用能力层已经算好的 `battlefield`（与看板同一份结构），
   // 不再单独拉一次绑定列表——两处各算一次，迟早会出现"看板说已绑定、池子说未绑定"。
