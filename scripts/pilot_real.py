@@ -55,12 +55,18 @@
 - `filter_dishracks_100.json`：按销量降序第 1 页（100 行）——头部 listing 的变体占满整页；
 - `filter_dishracks_band.json` + `filter_band_p2..p5`：**带 $18~$36 价格窗**、按 BSR 升序翻 5 页
   （这个价格窗是探查阶段为了看中腰部而加的，不是判定规则）；
-- `filter_dishracks.json`：按 BSR 降序第 1 页（20 行），补低价端的尝试。
+- `filter_dishracks.json`：按 BSR 降序第 1 页（20 行），补低价端的尝试；
+- `filter_band_lowprice.json` + `..._p2.json`：按**价格升序**翻 2 页、不带价格窗、
+  `max_bsr=20000`，覆盖 $1.41~$16.99 —— 这一对是专门用来消掉低价段偏差的。
 
-后果：**低于约 $16.78 的低价段没有被系统采样**。所以
-「本轮没有低价冲击型竞品」这句话只能读成「窗口里没有」，不能读成「市场上没有」。
-要消掉这个偏差，得补一页「按价格升序、不带价格窗」的拉取——bridge 停着的时候没做成，
-留作下一轮第一件事。
+上一轮结尾时 $16.78 以下完全没被采样，当时只能说「窗口里没有低价竞品」。
+补齐后发现：这个节点的价格结构是**双峰**的——$1.4~$13 是一大簇（100 条里有 95 条价格比 <0.7，
+全部落在四同法则的带外），$16~$36 是另一簇，两簇之间 $13~$16 很薄。
+锚点定在 $22.99，落在上面那一簇里。
+
+所以现在能说的比上一轮强一句：**低价段不是没人，是形态不同档**——
+它们真实存在且量大，但价格比 0.30~0.57，按四同法则本就不该入池。
+仍然不能说的是「$13~$16 这个窄缝里没有别的对手」——那需要按价格窗专门再拉一次。
 
 ## 这一轮跑不出「变化」
 
@@ -72,9 +78,20 @@
 
     python scripts/pilot_real.py                    # 造 pilot 数据 + 打印报告
     python scripts/pilot_real.py --serve            # 造数 + 起服务看面板
-    python scripts/pilot_real.py --limit 10         # 只取 BSR 最靠前的 10 个竞品
+    python scripts/pilot_real.py --limit 10         # 只取 BSR 最靠前的 10 个竞品（**会截断**，见下）
     python scripts/pilot_real.py --anchor B0XXXXXXX # 换一个自家产品（必须是 raw 里有的）
     python scripts/pilot_real.py --db data/x.db     # 换库（默认 data/pilot.db，绝不写主库）
+
+## 为什么 `--limit` 默认是 0（不限）
+
+第一版默认 20，按 BSR 升序截断。补了低价段数据之后，池子从 17 掉到 12——
+**数据变多、竞品反而变少**，因为 $6~$15 那批便宜货 BSR 更好，把带内的真候选挤出了前 20。
+
+这不是「池子本来就是这 12 个」，而是截断点把「采样窗口」混进了「判定规则」：
+被挤掉的候选从来没被判过，报告里也就看不到它们被拒的理由。
+
+所以默认改成不限，`--limit N` 只在明确要一张短名单时用，且**必须**在报告里
+看到那行截断提示——「有 M 个没评估」和「这 M 个不合格」是两件完全不同的事。
 
 ## 写哪个库
 
@@ -142,6 +159,10 @@ NODE_RAW_FILES = (
     "filter_band_p3.json",
     "filter_band_p4.json",
     "filter_band_p5.json",
+    # 补采样：按价格升序、**不带价格窗**、`max_bsr=20000`，两页共覆盖 $1.41~$16.99。
+    # 加这两页之前，$16.78 以下的低价段一个都没采到——这是上一轮遗留的采样偏差。
+    "filter_band_lowprice.json",
+    "filter_band_lowprice_p2.json",
 )
 
 #: 候选门槛。**刻意不按价格带筛**：价格带是 `judge_tier` 要判的东西，
@@ -194,7 +215,7 @@ from app.adapters.unified import TieringResult, UnifiedSnapshot   # noqa: E402
 from app.config import settings                                   # noqa: E402
 from app.db import get_session, init_db                           # noqa: E402
 from app.domain import baseline as baseline_mod                   # noqa: E402
-from app.domain.tiering import judge_tier                         # noqa: E402
+from app.domain.tiering import fmt_ratio_to_show_side, judge_tier  # noqa: E402
 from app.models import (                                          # noqa: E402
     Competitor,
     CompetitorBinding,
@@ -342,11 +363,15 @@ def _pick_candidates(items: list[dict], anchor_asin: str, limit: int) -> list[di
       1. 排除锚点本身、以及锚点所在 listing 的其他变体（那是自己，不是对手）；
       2. 月销 ≥ `MIN_MONTHLY_SALES`、BSR ≤ `MAX_BSR` —— 没销量的链接观察成本高于价值；
       3. 按 `parent_asin` 归并后取最便宜子体；
-      4. 按 BSR 升序取前 `limit` 个。
+      4. 按 BSR 升序排序；`limit > 0` 时截前 `limit` 个，`limit <= 0` 表示不截断。
 
     **不按价格带筛**：价格带是同一条判定规则里的一项，先按它筛再报「全在带内」
     等于把结论写进前提。价格带外的候选照样进池子，由 `judge_tier` 判成 C 并说明原因
     （它们在报告里能看到，只是不入池——那才是真实行为）。
+
+    第 4 步的截断也是同一类陷阱：按 BSR 截断时，带外的便宜货会把带内的候选挤出去，
+    而「没被判过」和「被判成 C」在报告里长得一模一样。所以调用方有义务把
+    「截掉了几个」打出来，`limit` 的默认值因此是 0（不限）。
     """
     anchor_parent = None
     for item in items:
@@ -382,7 +407,9 @@ def _pick_candidates(items: list[dict], anchor_asin: str, limit: int) -> list[di
         picked.append(rep)
 
     picked.sort(key=lambda r: (_to_int(r.get("bsr_rank")) or 10**9))
-    return picked[:limit]
+    if limit and limit > 0:
+        return picked[:limit]
+    return picked
 
 
 # ============================================================
@@ -564,6 +591,15 @@ def _write_one(
         "brand": snap.brand,
         "price": snap.price,
         "price_ratio": res.price_ratio,
+        # 表格里的价格比要和「拒收理由」那句话用同一个数字。
+        # 两处各算一次 `:.2f` 的话，$15.99 那行会左边写 0.70、右边写 0.696。
+        "price_ratio_text": (
+            None
+            if res.price_ratio is None
+            else fmt_ratio_to_show_side(
+                res.price_ratio, thresholds.price_ratio_min, thresholds.price_ratio_max
+            )
+        ),
         "bsr": snap.rank_main,
         "monthly_units": snap.monthly_units,
         "rating": snap.rating,
@@ -692,7 +728,7 @@ def _print_report(anchor: dict, rows: list[dict], captured_at: datetime) -> None
     for r in sorted(admitted, key=lambda x: (_tier_order(x["tier"]), x["price_ratio"] or 9)):
         print(
             _pad(r["asin"], 13) + _pad((r["brand"] or "")[:15], 17)
-            + _pad(_fmt(r["price"]), 8, "right") + _pad(_fmt(r["price_ratio"]), 8, "right")
+            + _pad(_fmt(r["price"]), 8, "right") + _pad(r["price_ratio_text"] or "—", 8, "right")
             + _pad(_fmt(r["bsr"]), 8, "right") + _pad(_fmt(r["monthly_units"]), 8, "right")
             + _pad(_fmt(r["review_count"]), 8, "right") + "  "
             + _pad(_tier_cell(r), 12) + _row_note(r)
@@ -705,7 +741,7 @@ def _print_report(anchor: dict, rows: list[dict], captured_at: datetime) -> None
         for r in sorted(rejected, key=lambda x: x["price_ratio"] or 9):
             print(
                 _pad(r["asin"], 13) + _pad((r["brand"] or "")[:15], 17)
-                + _pad(_fmt(r["price"]), 8, "right") + _pad(_fmt(r["price_ratio"]), 8, "right")
+                + _pad(_fmt(r["price"]), 8, "right") + _pad(r["price_ratio_text"] or "—", 8, "right")
                 + "  " + _pad(f"{r['tier']}", 4) + (r["reject_reason"] or "—")
             )
 
@@ -724,8 +760,10 @@ def _print_report(anchor: dict, rows: list[dict], captured_at: datetime) -> None
     print("  本轮没有变化信号：只有一轮快照，没有前后对比；变化检测要等第二轮采集，")
     print("        且那时必须有促销接口确认到手价，否则价格维度按规则直接失效（宁可漏报）")
     print("  退货率上无处可落（数据模型没有这一列），本轮不参与任何判断")
-    print("  采样窗口 按销量第 1 页 + $18~$36 带内按 BSR 5 页：**低于约 $16.78 的低价段没被采样**，")
-    print("       所以「池子里没有低价冲击品」只能读成「窗口里没有」，不能读成「市场上没有」")
+    print("  采样窗口 按销量第 1 页 + $18~$36 带内按 BSR 5 页 + 按价格升序 2 页（$1.41~$16.99），")
+    print("       低价段已补齐。补上之后看到的是双峰：$1.4~$13 一大簇（价格比 0.06~0.57，全在带外）")
+    print("       + $16~$36 一簇（锚点在这簇里），两簇之间 $13~$16 很薄。")
+    print("       仍不能说「$13~$16 这个窄缝里没有对手」——那要按价格窗专门再拉一次。")
 
 
 def _tier_order(tier: str) -> int:
@@ -773,7 +811,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="真实数据 pilot：真实 ASIN 当自家产品，跑真实竞品池")
     ap.add_argument("--db", default=None, help="目标库（默认 data/pilot.db）")
     ap.add_argument("--anchor", default=DEFAULT_ANCHOR_ASIN, help="当自家产品用的真实 ASIN")
-    ap.add_argument("--limit", type=int, default=20, help="竞品上限（按 BSR 升序取）")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="竞品上限（按 BSR 升序截断；0 = 不限，默认）。"
+                         "非 0 时报告会打一行「另有 N 个未评估」")
     ap.add_argument("--serve", action="store_true", help="造完数据后直接起服务")
     ap.add_argument("--port", type=int, default=settings.app_port, help="起服务的端口")
     args = ap.parse_args()
@@ -811,6 +851,13 @@ def main() -> None:
     candidates = _pick_candidates(items, anchor_asin, args.limit)
     print(f"  候选 {len(candidates)} 个（同节点 / 月销 ≥ {MIN_MONTHLY_SALES} / BSR ≤ {MAX_BSR}，"
           f"变体已归并）")
+    if args.limit:
+        dropped = len(_pick_candidates(items, anchor_asin, 0)) - len(candidates)
+        if dropped > 0:
+            # 这行不是啰嗦：截断掉的候选从来没被判过，报告里也不会出现它们，
+            # 所以不写出来就会被读成「它们不合格」。
+            print(f"  注意：另有 {dropped} 个候选被 --limit {args.limit} 截掉，本轮**未评估**"
+                  f"（按 BSR 排序后被挤出的都在带内，别读成不合格）")
 
     captured_at = datetime.now().replace(microsecond=0)
     with get_session() as s:
