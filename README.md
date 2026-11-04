@@ -456,8 +456,56 @@ python run.py --no-scheduler
 - **采集频率上限没测过**（卖家精灵 bridge 的风控）。这是唯一真正的阻塞项：
   上限没测出来之前，"准实时预警"和"每日巡检"哪个是产品形态全是假设。
   `docs/` 里的 25 分钟/100 竞品是**估算**，不是实测值。
-- **SP-API 未接入**，自家数据仍靠手填锚点。接的时候用独立的 `SelfSnapshot`，
-  不要塞进 `UnifiedSnapshot`（见红线 2）。
+- **SP-API 只到适配层，凭据还没配**：`app/adapters/self_snapshot.py`（独立类型）
+  + `app/adapters/spapi.py`（分段取数）+ 固定 fixture 测试都已落地，三项 LWA 凭据
+  （`SPAPI_REFRESH_TOKEN` / `SPAPI_CLIENT_ID` / `SPAPI_CLIENT_SECRET`）缺任一，
+  `SpApiAdapter.configured` 就是 `False`，取数直接抛 `SpApiNotConfigured` 并说清缺什么。
+  在那之前自家数据仍靠手填锚点。
+- **`release_date`（上架日期）现在会落库了**，所以「A 级黑马」这条判据在重算时不再失效。
+  在此之前它只在采集当刻有效——从库里重算就变 `None`，黑马永不命中，而且不报错。
+
+
+---
+
+## 真实数据 pilot（`scripts/pilot_real.py`）
+
+演示数据只证明算法自洽，不证明它判得对。pilot 把数据源换成**卖家精灵选品库的真实返回**，
+拿一个真实 ASIN 当「自家产品」，走同一套 `judge_tier` + 落库代码，让分层第一次对着真实市场分布产生。
+
+```
+python scripts/pilot_real.py            # 造 pilot 数据 + 打印报告（写 data/pilot.db）
+python scripts/pilot_real.py --serve    # 造完直接起面板
+```
+
+- **默认锚点** `B0BYVBMPTD`（Dish Racks 节点里一个中腰部 listing：$22.99、月销 3345、
+  BSR 2440、4.8 星 5335 条评论、2023-03 上架、FBA）。挑头部（JASIWAY，月销 18844、62 个变体）
+  会让「跟价压力」这个前提失真。
+- **候选来自同一个类目节点**（`node_id_path` 由 `/market/research` 给出），所以
+  `node_match` 是**构造保证**而不是猜的。选品库不返回商品的类目路径（`category_path` 恒空，
+  三个 ASIN 交叉确认过），这条是唯一正当的解法。
+- **候选不按价格带筛**。价格带是要判的东西，先按它筛再报「全在带内」等于把结论写进前提。
+  带外的照样进判定，被判 C 并在报告里列出来。
+
+**哪些是真、哪些不是**
+
+| 字段 | 真假 |
+|---|---|
+| 标价 / 月销 / BSR / 评分 / 评论数 / 上架日期 / 品牌 / 标题 | 真（公开数据） |
+| 到手价、优惠券 | **拿不到**（选品库只给标价，绝不填进 `net_price`） |
+| 流量词 / 词重合度 | **拿不到**（该账号关键词模块无权益，三条通道全空） |
+| 保本价 / 目标毛利率 / FBA 可售库存 / 补货周期 / 日均销量 | **假设值**，写进 `assumed_fields` |
+| 退货率 | **无处可落**（模型没这列）→ 不参与任何判断 |
+
+由此这一轮能信的只有：同战场识别、价格带是否重叠。**S/A/B/C 的字母档只能给「暂定」**
+（词重合缺一维，`judge_tier` 给中间档 B 并标 `provisional`）；断货预警、提价/降价空间、
+补货建议都**不能用**，它们依赖假设值。这一轮也没有变化信号——只有一轮快照，
+`DiffEngine` 要两次才能判「他降价了」。
+
+> 想把这些从「暂定」变成「可判」，卡在两件事上：卖家精灵会员（关键词额度）、
+> 以及真实第二轮采集（那时还得有促销接口确认到手价，否则价格维度按规则直接失效）。
+
+pilot 写的 `data/pilot.db` 和 `data/pilot_raw/` 都在 `.gitignore` 里：
+换台机器要先用 `scripts/bridge_probe.py` 重拉一轮原始返回（命令见该脚本顶部说明）。
 
 
 ---

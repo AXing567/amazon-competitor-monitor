@@ -24,6 +24,30 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _client(timeout: float) -> httpx.AsyncClient:
+    """造一个**不读环境代理**的 HTTP 客户端。
+
+    这一条不是防患于未然，是踩过的：pilot 期间同一个 URL
+    `http://127.0.0.1:8000/api/v1/product/filter?...`，`curl` 拿到 20 条真实商品，
+    而走 `urllib` 的探针拿到 **HTTP 502**，body 是代理自己写的
+    `upstream connect failed: ... (os error 10061)`。也就是说请求根本没到 bridge，
+    是被 `HTTP_PROXY`（本机指向沙箱代理）截走了。
+
+    之后同一条命令又能通——**所以这是"随时会翻脸"的环境问题，不是稳定复现的
+    bug**。正因为不稳定，才必须在代码里写死：靠环境变量决定"本地请求走不走代理"，
+    等于把「连不上 bridge」的概率交给别人的配置。
+
+    规则（改动前先读）：
+    - 本适配器的请求目标**只有 bridge**；bridge 在本地，任何代理都只是多余的一跳；
+    - 将来 bridge 挪到远端且确实要走代理，请**显式传 `proxy=`**，不要回头把
+      `trust_env` 打开——环境变量会同时影响「本地」和「远端」，而这两种情况的
+      正确行为相反；
+    - 别把这条规则抄给 `app/channels/feishu.py`：那边目标是公网
+      （open.feishu.cn），**该**走环境里的代理。
+    """
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 class SellerSpriteAdapter(DataAdapter):
     name = "sellersprite"
 
@@ -56,7 +80,7 @@ class SellerSpriteAdapter(DataAdapter):
         snap = UnifiedSnapshot(asin=asin, marketplace=marketplace, source=self.name)
         params = {"asin": asin, "marketplace": marketplace}
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with _client(self.timeout) as client:
             # 并发拉 5 个分段接口；每段失败独立，不影响其他段
             core_t, rank_t, promo_t, review_t, traffic_t = await asyncio.gather(
                 self._get(client, "/api/v1/competitor/core-info", params),
@@ -154,7 +178,7 @@ class SellerSpriteAdapter(DataAdapter):
         return snap
 
     async def fetch_keywords(self, asin: str, marketplace: str = "US") -> list[dict]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with _client(self.timeout) as client:
             data, err = await self._get(
                 client,
                 "/api/v1/competitor/traffic-keywords",
@@ -177,7 +201,7 @@ class SellerSpriteAdapter(DataAdapter):
 
     async def health(self) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with _client(10) as client:
                 resp = await client.get(f"{self.base_url}/health")
                 return {
                     "adapter": self.name,
