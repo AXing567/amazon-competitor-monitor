@@ -546,9 +546,40 @@ async def api_panel_review_action(
 
 
 # ============================================================
-# ⑥ 数据健康
+# ⑤b 自家数据接入（SP-API 同步）
 # ============================================================
 
+
+@router.post("/api/panel/baseline/sync")
+async def api_panel_baseline_sync(
+    request: Request,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> Any:
+    """从 SP-API 同步自家锚点。body: {asin?, marketplace?, dry_run?}
+
+    为什么要有 `dry_run`：第一次接通时谁都不知道凭据有没有角色权限、
+    这个 ASIN 拿不拿得到库存。先预览一次「能拿到什么、哪些拿不到」，
+    比按下去写库之后再去逐字段核对安全。
+    """
+    body, err = await _body(request)
+    if err is not None:
+        return err
+    ctx = _ctx(x_user_id)
+    return _json(
+        await run_in_threadpool(
+            _call,
+            "sync_self_baseline",
+            ctx,
+            asin=body.get("asin"),
+            marketplace=body.get("marketplace") or "US",
+            dry_run=bool(body.get("dry_run")),
+        )
+    )
+
+
+# ============================================================
+# ⑥ 数据健康
+# ============================================================
 
 @router.get("/api/panel/health")
 async def api_panel_health(

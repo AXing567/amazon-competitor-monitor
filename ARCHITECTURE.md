@@ -22,18 +22,20 @@
 │                   六个视图、单文件 HTML、REST 出口                  │
 ├────────────────────────────────────────────────────────────────────┤
 │ L4 能力层   app/capabilities/                                      │
-│             37 个能力 + 唯一入口 call(name, *, ctx, **kwargs)       │
+│             38 个能力 + 唯一入口 call(name, *, ctx, **kwargs)       │
 │             参数校验 · 身份携带 · 返回包装 —— 不写业务判断          │
 ├────────────────────────────────────────────────────────────────────┤
 │ L3 编排层   app/services/                                          │
 │             pool · collector · briefer · scheduler · settings_store │
 │             binding · identity · action_log · health · simulator    │
+│             self_sync（SP-API → 自家锚点，唯一自动来源）            │
 ├────────────────────────────────────────────────────────────────────┤
 │ L2 认知层   app/domain/            ★ 纯函数：无 IO、无时钟、无环境   │
 │             baseline · tiering · diff · decision · thresholds       │
 ├────────────────────────────────────────────────────────────────────┤
 │ L1 取数层   app/adapters/                                          │
-│             unified(数据契约) · base(抽象) · sellersprite           │
+│             unified(竞品契约) · self_snapshot(自家契约) · base       │
+│             sellersprite · spapi                                   │
 ├────────────────────────────────────────────────────────────────────┤
 │ L0 存储层   app/db.py · models.py · migrations.py                   │
 │             SQLAlchemy ORM · 10 张表 · 幂等迁移（DDL 也在事务里）   │
@@ -218,6 +220,36 @@ L5B ─┘                  ↓              ↑
 竞品数据走 `UnifiedSnapshot` → `DiffEngine`。两条链在 L2 里**只通过显式参数**相遇
 （`my_price=` / `my_dos=`），不通过共享对象。
 
+#### 溯源的三个层次，不能合并（2026-11-06）
+
+「这个数从哪来」在锚点上不是一个字段，是三层。它们的**粒度不同**，所以不能互相顶替：
+
+| 列 | 粒度 | 回答 | 取值 |
+|---|---|---|---|
+| `MyProduct.source` | 一行 | 这批数主要是怎么来的 | `manual` / `sp_api` / `sellersprite_proxy` |
+| `MyProduct.assumed_fields` | 一列 | 哪几个是拍的 | 字段名数组 |
+| `MyProduct.field_sources` | 一格 | 每一格到底谁写的 | `{字段: sp_api/manual/sellersprite/simulated}` |
+
+此前只有前两层，于是 `source=sellersprite_proxy` 被当成了「13 个格子都是反推的」。
+事实不是：保本价、目标毛利率、补货周期卖家精灵**结构上给不出**，它们是拍的。
+一个 `source` 同时承担"整批来源"和"逐格来源"两件事，结果就是面板上 13 个格子
+看起来一样可靠，而其中 3 个是编的。
+
+`domain/baseline.py` 的 `FIELD_ORIGINS` 是这张表的唯一真相：每个字段的
+「SP-API 怎么拿 / 手工怎么填 / 能不能反推」都写在那里，面板的「该从哪来」
+和真实模式下的准入判断都从它取。`tests/test_baseline_source_gate.py` 会检查它
+**覆盖 `DIMENSIONS` 的每一个字段**——漏一个的症状不是报错，是那一格在面板上
+显示「来源未定义」，而且真实模式下没有接入指引。
+
+**闸门在写入口，不在页面。** `pool.update_baseline()` 在真实模式下直接拒
+`source=sellersprite_proxy`（返回 `error_kind="source"`，且拒在写库之前）。
+理由：写进来之后，下游每个判断都会用它，而它们不再知道自己用的是反推值。
+页面上的红字只是第二层兜底，挡不住直接改库和历史备份。
+
+比闸门更关键的是 **`_autofill()` 在真实模式下整段不跑**。这个函数不走调用方、
+不过 `source` 参数：它自己拿卖家精灵构造快照、自己写库。它是「真实页显示反推数据」
+的真凶——闸门拦得住调用方，拦不住它。
+
 ### 3.3 适配器契约：`DataAdapter`
 
 位置：`app/adapters/base.py`
@@ -366,6 +398,9 @@ class Channel(ABC):
 | POST | `/api/panel/pool/{asin}/status` | 改状态：active / paused / archived |
 | GET | `/api/panel/actions` | 动作时间线（默认只看 `X-User-Id` 本人，`user_id=all` 看全团队） |
 | POST | `/api/panel/actions` | 手工补记一条动作（兜底入口） |
+| POST | `/api/panel/baseline/sync` | 从 SP-API 同步自家锚点（`dry_run=true` 只预览不写库） |
+| GET | `/api/panel/reviews` | 到期该复盘的动作 + 前后指标差 |
+| POST | `/api/panel/reviews` | 录复盘结论（verdict: 有效/无效/判不了） |
 | GET | `/api/panel/health` | 数据健康五块（一次打包） |
 | GET | `/api/config/thresholds/schema` | 阈值参数字典（面板表单的唯一来源） |
 | GET | `/api/config/thresholds` | 生效值 + 每键来源层 + 层版本 |
@@ -374,7 +409,7 @@ class Channel(ABC):
 | POST | `/api/config/thresholds/rollback` | 回滚（追加新版本） |
 | POST | `/api/config/thresholds/simulate` | 历史快照试算（dry-run，零写入） |
 | GET | `/api/config/thresholds/explain` | 当前阈值的人话说明 |
-| GET | `/api/cap` | 能力清单（37 个，自描述） |
+| GET | `/api/cap` | 能力清单（38 个，自描述） |
 | POST | `/api/cap/{name}` | 调用任意 `shared` 能力 |
 | GET | `/api/users` `/api/bindings` | 用户 / 身份 / 绑定 |
 | POST | `/api/actions/callback` | 飞书卡片按钮回调（未配密钥 → fail-closed） |

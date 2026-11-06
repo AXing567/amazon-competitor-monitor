@@ -103,25 +103,31 @@ MOCK_MY: dict[str, Any] = {
     "asin": MOCK_MY_ASIN,
     "platform": "amazon",
     "marketplace": "US",
-    # --- 供给 ---
-    # 库存是唯一标成假设值的字段：DOS = 2600 / 85 = 30.6 天，落在 normal 区间。
-    "fba_available_units": 2600,
-    "daily_sales_avg": 85.0,
-    "lead_time_days": 32,
-    # --- 财务 ---
-    "current_price": 24.99,
-    "break_even_price": 13.20,
-    "target_margin_rate": 0.28,
-    # --- 排位与口碑 ---
-    "sub_category_rank": 1850,
-    "rating": 4.5,
-    "review_count": 2180,
-    # --- Listing ---
+    # ---- 下面这组数不是编的：取自真实 ASIN B0BYVBMPTD 的卖家精灵反推 ----
+    # 为什么 Mock 也要用真数：编出来的锚点会让「价格带」「词重合」这些判断
+    # 在一个虚构的坐标系里成立，一换真数据就全错。能用反推拿到的就用真值。
+    #
+    # 反推拿得到的（价格 / 星级 / 评价 / 日销估算 / 标题 / 主图 / 类目）；
+    # 拿不到的（库存 / 保本价 / 交期 / 目标毛利 / 子类排名 / 词表）才模拟补充，
+    # 逐字段标注见 `MOCK_MY_FIELD_SOURCES`。
+    "current_price": 22.99,
+    "rating": 4.8,
+    "review_count": 5335,
+    # 卖家精灵的月销 ÷ 30，是**估算**不是订单级真值（见 MOCK_MY_FIELD_SOURCES）
+    "daily_sales_avg": 111.5,
     "title": (
-        "Roll Up Dish Drying Rack, 17.5\" x 15.7\" Silicone Wrapped Over the Sink "
-        "Dish Rack, Foldable Dish Drainer for Kitchen Counter"
+        "Roll Up Dish Drying Rack, Silicone Wrapped Over The Sink Dish Rack "
+        "Foldable Dish Drainer Anti-Slip Dish Racks"
     ),
-    "image_url": "https://m.media-amazon.com/images/I/mock-roll-up-rack.jpg",
+    "image_url": "https://m.media-amazon.com/images/I/61mockrollup.jpg",
+    # --- 以下为模拟补充 ---
+    # DOS = 2600 / 111.5 = 23.3 天，落在 normal 区间（<20 才会报库存告警）
+    "fba_available_units": 2600,
+    "lead_time_days": 35,
+    # 保本价：反推口径是「售价 ×(1−毛利率)」，毛利率本身是选品库估的，所以是估的
+    "break_even_price": 10.58,
+    "target_margin_rate": 0.25,
+    "sub_category_rank": 1850,
     "bullet_points": [
         "ROLL UP AND SAVE SPACE: rolls up to fit in a drawer when not in use",
         "HEAT RESISTANT TO 550F: doubles as a trivet for hot pots and pans",
@@ -129,10 +135,42 @@ MOCK_MY: dict[str, Any] = {
         "FITS MOST SINK SIZES: 17.5 x 15.7 in, covers standard kitchen sinks",
         "EASY TO CLEAN: dishwasher safe, rust-proof stainless steel core",
     ],
-    # 产地溯源：这些都是卖家自己知道的静态知识，所以是手工录入。
-    "source": "manual",
-    "assumed_fields": ["fba_available_units"],
+    # 整行来源：这批数**主要**是卖家精灵反推的。真实模式不收这份锚点
+    # （见 domain.baseline.live_block_reason），它只活在 Mock 库里。
+    "source": "sellersprite_proxy",
+    # 假设值 = 拍出来的数（不是"模拟字段"的全部：词表是模拟的，但它不是数值假设）
+    "assumed_fields": [
+        "break_even_price",
+        "target_margin_rate",
+        "lead_time_days",
+        "fba_available_units",
+        "sub_category_rank",
+    ],
 }
+
+#: 逐字段出身。和 `source` / `assumed_fields` 是三件事（见 models.MyProduct 第 6 节）：
+#: 一个说整批、一个说真假、这个说每一格是谁给的。
+MOCK_MY_FIELD_SOURCES: dict[str, str] = {
+    # 卖家精灵反推（真实数据）
+    "current_price": "sellersprite",
+    "rating": "sellersprite",
+    "review_count": "sellersprite",
+    "daily_sales_avg": "sellersprite",
+    "title": "sellersprite",
+    "image_url": "sellersprite",
+    "category_path": "sellersprite",
+    # 模拟补充（真实反推拿不到）
+    "fba_available_units": "simulated",
+    "lead_time_days": "simulated",
+    "break_even_price": "simulated",
+    "target_margin_rate": "simulated",
+    "sub_category_rank": "simulated",
+    # 词表：真实反推只回了 1 条（词库要分页取），演示要 20 条才像一页真实返回，
+    # 所以这里是模拟的——**这正是「没有的就模拟补充」那句话的落点**。
+    "core_keywords": "simulated",
+    "bullet_points": "simulated",
+}
+
 
 # ============================================================
 # 竞品场景
@@ -205,13 +243,14 @@ SCENARIOS: list[dict[str, Any]] = [
         "kw_total": 320,
         "base_price": 26.99,
         "days": 4,
-        # 今天降到 22.99（-14.8%）：跌破自家 24.99，是真正的价格战。
+        # 今天降到 19.99（-25.9%）：跌破自家 22.99，是真正的价格战。
         #
-        # 原本写的是 24.99——那会让 `judge_price_follow` 撞上一个退化场景：
-        # 对手追平我的价，「跟价」等于原地不动，而引擎仍算出「+0%」并建议行动。
-        # 那个 bug 已经修了（见 decision.py 的「第零道」），但 Mock 数据
-        # 更应该展示正常场景，而不是靠退化场景去证明判据存在。
-        "price_changes": {0: 22.99},
+        # 这个数换过两次，每次都是被引擎的退化场景逼出来的：
+        # 第一版写 24.99（当时自家 24.99）→ 对手「追平我的价」，引擎仍算出
+        # 「+0%」并建议降价，等于让人主动去守一个没丢的位置（已修）。
+        # 第二版写 22.99（自家改成真实反推值 22.99 之后）→ 又变成追平。
+        # 结论：Mock 的降价幅度必须**明显**低于自家价，否则演示的是退化分支。
+        "price_changes": {0: 19.99},
         "monthly_units": 3000,
         "rating": 4.7,
         "review_count": 4820,
@@ -260,12 +299,13 @@ SCENARIOS: list[dict[str, Any]] = [
         "title": "Attmu Stainless Steel Dish Drying Rack with Drip Tray, 2 Tier",
         "keywords": "one_low",
         "kw_total": 480,
-        "base_price": 31.99,
+        "base_price": 28.99,
         "days": 3,
-        # 34.49 / 24.99 = 1.380，仍在 1.4 带内。
-        # 一开始写的是 34.99（= 1.4002），自检当场判出 C ——
-        # 「价格出带 → 拒收」这条判据对小数点后第三位是敏感的，别凭手感写。
-        "price_changes": {0: 34.49},
+        # 30.49 / 22.99 = 1.326，仍在 1.4 带内。
+        # 这两个数改过两轮：自家价从 24.99 换成真实反推值 22.99 之后，
+        # 原价 34.49 的比值变成 1.5002 → 出带 → 自检当场判 C。
+        # 「价格出带 → 拒收」对小数点后第三位是敏感的，别凭手感写。
+        "price_changes": {0: 30.49},
         "monthly_units": 900,
         "rating": 4.5,
         "review_count": 6400,
@@ -551,6 +591,7 @@ def _seed_anchor() -> int:
             setattr(my, key, value)
         my.core_keywords = dict(MOCK_CORE_KEYWORDS)
         my.category_path = list(MOCK_COMP_PATH)
+        my.field_sources = dict(MOCK_MY_FIELD_SOURCES)
         s.flush()
         return int(my.id)
 
@@ -934,8 +975,8 @@ PENDING_ACTION_ASIN = "B0MOCK1001"
 #:
 #: ## 为什么改排名和评价数，**不改价格**
 #:
-#: 价格改了会留下一个看不见的矛盾：看板显示「净价 $21.99」，
-#: 而最近一条信号写着「26.99 → 22.99」。因为信号是 DiffEngine 在**采集时**
+#: 价格改了会留下一个看不见的矛盾：看板显示「净价 $19.99」，
+#: 而最近一条信号写着「26.99 → 19.99」。因为信号是 DiffEngine 在**采集时**
 #: 判出来的，这条补的快照没有走采集，也就没有对应信号。
 #: 于是同一个竞品上的两个数各说各话，看的人只会怀疑数据是编的。
 #:
@@ -963,9 +1004,11 @@ def _seed_actions(uid: int, my_id: int) -> None:
     「动作前 → 现在」两边一模一样，复盘卡上只会显示「指标没有任何变化」——
     那是真的结论（动作没起作用），但用来演示等于什么都没演示。
 
-    所以这里补一条今天晚些时候的快照（对手二次降价 24.99 → 23.49），
-    让待复盘那张卡上有真实的「前后差」。
-    补完之后 `build()` 会**再跑一次 `_rescore`**：分层必须在新价格下依然成立，
+    所以这里补一条今天晚些时候的快照（排名 420 → 398、评价 4820 → 4836），
+    让待复盘那张卡上有真实的「前后差」。**刻意不动价格**：价格一变就会和
+    最近那条信号（26.99 → 19.99）各说各话，而那条信号是采集时判出来的，
+    这条补的快照没走采集、没有对应信号。
+    补完之后 `build()` 会再跑一次 `_rescore`：分层必须在新数据下依然成立，
     否则这条 Mock 数据就是自相矛盾的。
 
     ## 为什么 `executed_at` / `verify_due_at` 是事后改的
@@ -1001,7 +1044,7 @@ def _seed_actions(uid: int, my_id: int) -> None:
     plan: list[tuple[str, str, int, Optional[int], Optional[str]]] = [
         ("listing_optimize", "把「可折叠」拍到第一张主图上", 5, None, None),
         ("coupon_test", "挂 5% Coupon 试让利，不改标价", 12, 7, "effective"),
-        ("price_follow", "对手降到 22.99，我们跟到 22.49 保住 buybox", 8, 7, None),
+        ("price_follow", "对手降到 19.99，我们跟到 19.49 保住 buybox", 8, 7, None),
         ("stock_alert", "按 32 天补货周期下了 3000 件", 2, None, None),
     ]
 

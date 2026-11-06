@@ -47,6 +47,22 @@
 > 教训记在这里：接口返回 0 条时，「没权限」和「没采到」是两件事，
 > 而它们的输出长得一模一样。
 
+## 这个库里的「自家锚点」是 Mock，脚本必须自己承认（2026-11-06 补）
+
+拿一个真实竞品的公开数据当「我们自己」，做出来的锚点**是演示数据**：
+它的价格、星级、评价数来自别人家的商品页，库存和保本价是拍的。
+这和「接入自家后台」在面板上长得一模一样，所以——
+
+- 本脚本整轮跑在 **Mock 模式**下（`set_data_mode(DATA_MODE_MOCK)`），
+  `mock_database_url` 被指向 `--db` 那个文件。于是 `pool.update_baseline` 的
+  来源闸门不会把它当真实数据放行，也不用给 `sellersprite_proxy` 开后门。
+- 库里那行锚点带着 `source='sellersprite_proxy'`，逐格 `field_sources` 分清
+  「反推来的」和「模拟补充的」。切到**真实模式**看这个库，锚点会被判为不可用
+  并显示原因——那是正确行为，不是 bug。
+- 要看这套演示数据，起服务时两个连接串都指同一个文件（脚本结尾会打印完整命令）。
+
+自家真实数据只有两条路：SP-API 同步（`app/services/self_sync.py`）和手工录入。
+
 由此，这一轮能信的结论和不能信的结论是分开的：
 
 - 能信：同战场识别（节点）、价格带是否重叠（标价对标的，双方同口径）、谁在价格带外、
@@ -224,7 +240,12 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.adapters.unified import TieringResult, UnifiedSnapshot   # noqa: E402
 from app.config import settings                                   # noqa: E402
-from app.db import get_session, init_db                           # noqa: E402
+from app.db import (                                              # noqa: E402
+    DATA_MODE_MOCK,
+    get_session,
+    init_db,
+    set_data_mode,
+)
 from app.domain import baseline as baseline_mod                   # noqa: E402
 from app.domain.tiering import fmt_ratio_to_show_side, judge_tier  # noqa: E402
 from app.models import (                                          # noqa: E402
@@ -235,6 +256,30 @@ from app.models import (                                          # noqa: E402
     Snapshot,
 )
 from app.services import binding, collector, pool, settings_store  # noqa: E402
+
+
+# ============================================================
+# 把这一轮钉在 Mock 模式上（见模块 docstring 的「自家锚点」一节）
+# ============================================================
+
+
+def _bind_mock_mode_to_target_db() -> None:
+    """让 Mock 模式指向 `--db` 那个文件，并把进程切到 Mock。
+
+    两个动作缺一不可：
+      1. `mock_database_url` 指向 `--db` 那个文件——否则 Mock 模式会跑去写
+         `data/mock.db`，而 `--db` 指定的库只剩竞品没有锚点；
+      2. `set_data_mode(MOCK)`——否则 `pool.update_baseline` 的来源闸门
+         会（正确地）拒掉这次写入，脚本运行到一半才报错。
+
+    **必须在 main() 里调，不能在 import 期调**：`tests/test_pilot_candidate_window.py`
+    会 `import scripts.pilot_real` 来测候选筛选逻辑，而 `_current_mode` 是进程级的
+    ContextVar——import 期一设，整轮 pytest 后面所有用例都跑在 Mock 模式下，
+    症状是十几条风马牛不相及的用例一起红（本轮真踩过）。
+    """
+    settings.mock_database_url = settings.database_url
+    os.environ["MOCK_DATABASE_URL"] = str(settings.database_url)
+    set_data_mode(DATA_MODE_MOCK)
 
 
 # ============================================================
@@ -494,6 +539,26 @@ def _anchor_fields(item: dict) -> dict:
             "lead_time_days",
             "daily_sales_avg",
         ],
+        # 逐格出身。整行 `source=sellersprite_proxy` 只说「这批数主要是反推的」，
+        # 但保本价、目标毛利、补货周期卖家精灵根本给不出——它们是按售价和
+        # 毛利率拍出来的。两者混在一个 `source` 里，面板上 13 个格子看起来一样可靠。
+        #
+        # `fba_available_units` 刻意不在表里：这一格留空，所以没有"出身"可言。
+        # 给它标一个 origin 会让人以为那里有值，只是没显示。
+        "field_sources": {
+            "current_price": baseline_mod.ORIGIN_SELLERSPRITE,
+            "rating": baseline_mod.ORIGIN_SELLERSPRITE,
+            "review_count": baseline_mod.ORIGIN_SELLERSPRITE,
+            "title": baseline_mod.ORIGIN_SELLERSPRITE,
+            "image_url": baseline_mod.ORIGIN_SELLERSPRITE,
+            "category_path": baseline_mod.ORIGIN_SELLERSPRITE,
+            "core_keywords": baseline_mod.ORIGIN_SELLERSPRITE,
+            # 月销 ÷ 30：数来自卖家精灵，但换成"日均"这一步是算出来的
+            "daily_sales_avg": baseline_mod.ORIGIN_SELLERSPRITE,
+            "break_even_price": baseline_mod.ORIGIN_SIMULATED,
+            "target_margin_rate": baseline_mod.ORIGIN_SIMULATED,
+            "lead_time_days": baseline_mod.ORIGIN_SIMULATED,
+        },
     }
     return fields
 
@@ -893,6 +958,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=settings.app_port, help="起服务的端口")
     args = ap.parse_args()
 
+    # 这一步必须在任何读写库的动作之前：它决定了这个脚本写进去的数算 Mock。
+    _bind_mock_mode_to_target_db()
+
     anchor_asin = args.anchor.strip().upper()
     print(f"pilot 目标库：{_target_display()}")
     print(f"           绝对路径：{_path_of_sqlite_url(str(settings.database_url)).resolve().as_posix()}")
@@ -954,8 +1022,17 @@ def main() -> None:
     # 而 Git Bash 的 `$(pwd)` 给的是 `/c/Users/...`——拼成 `sqlite:////c/Users/...`
     # 之后 SQLite 会安静地建出一个空库（本轮真踩过：面板连上了，池子里 0 条）。
     # 空库不报错，只是什么都没有，所以把绝对 URL 直接给出来让人照抄。
-    print(f"  或：  DATABASE_URL=\"{settings.database_url}\" uvicorn app.api.server:app --port {args.port}")
-    print("  面板上该看到的：池子里只有入池的竞品（B 暂定 / A）；锚点页会点名哪几个字段是假设值。")
+    #
+    # 两个连接串都要给：这个库的内容是 Mock，面板**必须**用 Mock 模式打开才看得到
+    # 锚点判断。真实模式下打开它会看到 68 个竞品 + 一句「锚点已停用」——
+    # 那是正确行为（锚点确实是反推的），但会把第一次跑这个脚本的人吓一跳。
+    print("  或：  "
+          f'DATABASE_URL="{settings.database_url}" '
+          f'MOCK_DATABASE_URL="{settings.database_url}" '
+          f"uvicorn app.api.server:app --port {args.port}")
+    print("        然后在面板上切到「Mock 数据」——这个库的锚点是反推的，真实模式下会被判为不可用。")
+    print("  面板上该看到的：池子里只有入池的竞品（B 暂定 / A）；锚点页会点名哪几个字段是假设值，"
+          "并逐格标出「反推 / 模拟」。")
 
     if args.serve:
         _serve(args.port)

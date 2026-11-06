@@ -16,7 +16,7 @@ from sqlalchemy import desc, select
 
 from app.adapters.sellersprite import SellerSpriteAdapter
 from app.config import settings
-from app.db import get_session
+from app.db import DATA_MODE_LIVE, get_data_mode, get_session
 from app.domain import baseline as baseline_mod
 from app.domain.tiering import judge_tier
 from app.models import Competitor, MyProduct, Signal, Snapshot
@@ -72,7 +72,16 @@ def ensure_my_product(
 
 
 def _autofill(my_id: int) -> list[str]:
-    """拉自家 ASIN 的公开数据，补齐锚点。网络失败静默跳过。"""
+    """拉自家 ASIN 的公开数据，补齐锚点。网络失败静默跳过。
+
+    **真实模式下整段不跑。** 这一步填进去的是「别人家商品页上的公开数据」，
+    自家真正的账（库存、销量、成本）它一个都给不了。以前它在真实模式下也跑，
+    结果是一次"自动补全"就把自家锚点变得看起来齐全——而里面没有一个数来自后台。
+    真实模式要的是 `self_sync`（SP-API），要不到就该空着，空着会如实说"判不了"。
+    """
+    if get_data_mode() == DATA_MODE_LIVE:
+        return []
+
     with get_session() as s:
         my = s.get(MyProduct, my_id)
         if my is None or not my.asin:
@@ -96,6 +105,16 @@ def _autofill(my_id: int) -> list[str]:
         if not my.daily_sales_avg and snap.monthly_units:
             my.daily_sales_avg = round(snap.monthly_units / 30, 1)
             filled.append("daily_sales_avg(按 月销/30 估算)")
+        # 这批数是反推来的，逐格标清。不标的话面板会把它显示成"已填"，
+        # 而人看到"已填"就会以为它是自家的账。
+        if filled:
+            sources = dict(my.field_sources or {})
+            for name in filled:
+                key = name.split("(")[0]
+                if key in baseline_mod.FIELD_ORIGINS:
+                    sources[key] = baseline_mod.ORIGIN_SELLERSPRITE
+            my.field_sources = sources
+            my.source = baseline_mod.SOURCE_SELLERSPRITE
         return filled
 
 
@@ -124,10 +143,27 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
         "bullet_points",
         "core_keywords",
         "category_path",
-        # 溯源两列（见 models.MyProduct 第 6 节）
+        # 溯源三列（见 models.MyProduct 第 6 节）
         "source",
         "assumed_fields",
+        "field_sources",
     }
+
+    # ---- 闸门：真实模式不接受卖家精灵反推 ----
+    # 为什么拦在这里而不是只在页面上标红：写进来之后，下游每一个判断都会用它，
+    # 而它们都不再知道自己用的是反推值。`_autofill()` 以前正是这么干的——
+    # 一次"自动补全"就把自家锚点填满了别人家的公开数据。
+    incoming_source = str(fields.get("source") or "").strip().lower()
+    if get_data_mode() == DATA_MODE_LIVE:
+        block = baseline_mod.live_block_reason(incoming_source)
+        if block:
+            return {
+                "ok": False,
+                "error": block,
+                "error_kind": "source",
+                "hint": "真实模式下自家数据只能来自 SP-API 同步或手工录入。"
+                        "演示用的反推数据请切到 Mock 模式。",
+            }
 
     # `assumed_fields` 的形状校验：这里再挡一道，是因为本函数还有能力层之外的
     # 两个调用方（`app/api/server.py`、`scripts/set_baseline.py`）。
@@ -172,6 +208,26 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
             setattr(my, k, v)
             updated.append(k)
 
+        # ---- 字段级出身：谁写的就标谁 ----
+        # 走这条路的只有人（面板/API/脚本），所以本次写入的字段默认标 `manual`；
+        # SP-API 同步走 `self_sync`，它自己会带 `field_sources`。
+        # 为什么在这里自动标，而不是要求每个调用方自己拼：调用方有四个
+        # （能力层、`api/server.py`、`scripts/set_baseline.py`、pilot 脚本），
+        # 少写一个地方，那一批数就会显示成「来源未知」——比标错更糟。
+        explicit = fields.get("field_sources")
+        if isinstance(explicit, dict):
+            sources = {
+                str(k2): str(v2)
+                for k2, v2 in explicit.items()
+                if k2 in allowed or k2 in baseline_mod.FIELD_ORIGINS
+            }
+        else:
+            sources = dict(my.field_sources or {})
+            for k in updated:
+                if k in baseline_mod.FIELD_ORIGINS:
+                    sources[k] = baseline_mod.ORIGIN_MANUAL
+        my.field_sources = sources
+
         # 填了售价与毛利率但没填保本价 → 自动推算一个，并明确标注是推算值
         inferred = None
         if "break_even_price" not in updated and my.current_price and my.target_margin_rate:
@@ -194,6 +250,11 @@ def update_baseline(tenant_id: Optional[str], **fields) -> dict:
                         updated.append("assumed_fields(自动标注：break_even_price)")
 
         out = _my_to_dict(my)
+        # 成功也要带 `ok`：失败路径返回的是 `{"ok": False, "error": ...}`，
+        # 若成功路径没有这个键，调用方写 `if not res.get("ok")` 会把**成功**当成失败，
+        # 写 `if res.get("error")` 又得知道哪个键在哪种情况下存在。
+        # 两条路径形状一致，判断才只有一种写法。
+        out["ok"] = True
         out["updated_fields"] = updated
         out["inferred"] = {"break_even_price": inferred} if inferred else {}
         return out

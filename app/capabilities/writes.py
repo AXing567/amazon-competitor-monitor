@@ -41,6 +41,7 @@ from app.services import (
     collector,
     identity,
     pool,
+    self_sync,
     settings_store,
 )
 
@@ -211,6 +212,30 @@ def set_baseline(ctx: CapContext, **kwargs) -> dict:
         return res
     return {"ok": True, "result": res}
 
+
+
+# ============================================================
+# ⑬ sync_self_baseline
+# ============================================================
+
+
+def sync_self_baseline(
+    ctx: CapContext,
+    asin: Optional[str] = None,
+    marketplace: str = "US",
+    dry_run: bool = False,
+) -> dict:
+    """从 SP-API 把自家锚点同步一遍。
+
+    这是「自家数据」唯一的自动来源。另一条是手工录入（`set_baseline`）。
+    卖家精灵反推**不在**这里：它拿的是别人家商品页上的公开数据，
+    进不了自家锚点（真实模式会在 `pool.update_baseline` 里直接拒掉）。
+
+    `dry_run=True` 只取数不落库，用来在面板上先看「能拿到什么、哪些拿不到」。
+    """
+    return self_sync.sync(
+        ctx.tenant_id, asin=asin, marketplace=marketplace, dry_run=dry_run
+    )
 
 # ============================================================
 # ⑤ set_season_phase
@@ -626,6 +651,22 @@ CAPABILITIES: tuple[Capability, ...] = (
             ),
         ),
         handler=set_baseline,
+    ),
+    Capability(
+        name="sync_self_baseline",
+        scope=SCOPE_SHARED,
+        group=GROUP_WRITE,
+        title="从 SP-API 同步自家锚点",
+        description=(
+            "把自家后台的库存/销量/到手价/标题/主图/类目同步进锚点，逐字段标来源。"
+            "星级、评价数、成本账 SP-API 不提供，保持原值。"
+        ),
+        params=(
+            _p("asin", "同步哪个 ASIN", T_STR, help="不传则用锚点上已有的 ASIN"),
+            _p("marketplace", "站点", T_STR, default="US"),
+            _p("dry_run", "只预览不落库", T_BOOL, default=False),
+        ),
+        handler=sync_self_baseline,
     ),
     Capability(
         name="set_season_phase",

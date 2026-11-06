@@ -41,6 +41,9 @@ SECTION = """
       <div class="empty">加载中…</div>
     </div>
 
+    <h2 class="sec">自家数据从哪来</h2>
+    <div id="bl-source"><div class="empty">加载中…</div></div>
+
     <h2 class="sec">自家锚点</h2>
     <div id="bl-anchor"><div class="empty">加载中…</div></div>
 
@@ -86,11 +89,14 @@ async function blLoad(){
   ]);
   blRenderModes(ds);
   BL_STATE = bl;
+  blRenderSource(bl);
   if (!bl.exists) {
     $('#bl-anchor').innerHTML =
       '<div class="warnbox"><b>还没有自家锚点。</b><br>' +
       '没有它，系统无法判断任何一个竞品：算不出价格比、算不出词重合、' +
-      '也说不出「该不该跟价」。先在下面填三个数——售价、保本价、日均销量。</div>';
+      '也说不出「该不该跟价」。<br>' +
+      '两条路：① 配好 SP-API 后点上面的「从 SP-API 同步」；' +
+      '② 直接在下面手工填——<b>售价、保本价、日均销量</b>三个数就能开始判了。</div>';
     $('#bl-dims').innerHTML = '';
     $('#bl-dims-note').textContent = '';
     blRenderForm(null);
@@ -167,11 +173,185 @@ function blRenderModes(ds){
   });
 }
 
+// ── 自家数据从哪来 ────────────────────────────────────────────
+// 这一块回答的不是「值是多少」，而是「这个值谁给的、缺的该去哪拿」。
+//
+// 为什么非要有这一块：真实模式下自家数据只有两个合法来源——SP-API 与手工。
+// 而卖家精灵反推同样能填出价格/星级/评价，页面上一视同仁地显示，看起来
+// 和"接入完成"一模一样。**错的不是数值，是它的身份。**
+const ORIGIN_META = {
+  sp_api:       {cls: 'sp_api',       text: 'SP-API'},
+  manual:       {cls: 'manual',       text: '手工'},
+  sellersprite: {cls: 'sellersprite', text: '反推'},
+  simulated:    {cls: 'simulated',    text: '模拟'},
+};
+
+function blOriginTag(origin){
+  if (!origin) return '<span class="tag nokind" title="这一格的历史数据没有记录来源">来源未标注</span>';
+  const m = ORIGIN_META[origin] || {cls: 'nokind', text: origin};
+  return '<span class="tag ' + m.cls + '">' + esc(m.text) + '</span>';
+}
+
+function blRenderSource(bl){
+  const d = bl.data_source || {};
+  const sp = d.spapi || {};
+  const cnt = d.counts || {};
+  const live = d.mode === 'live';
+
+  const countText = ['sp_api', 'manual', 'sellersprite', 'simulated', 'unknown']
+    .filter(k => cnt[k])
+    .map(k => (ORIGIN_META[k] ? ORIGIN_META[k].text : '未标注') + ' ' + cnt[k])
+    .join(' · ') || '还没有任何字段';
+
+  let html = '';
+
+  if (live) {
+    html += '<div class="note">真实模式下，自家数据只认两个来源：' +
+      '<b>SP-API 同步</b>（库存/销量/到手价/标题/主图/类目）和<b>手工录入</b>' +
+      '（保本价、成本、交期、星级评价这些接口给不了的）。' +
+      '卖家精灵反推的数据只出现在 Mock 里。</div>';
+
+    if (!sp.configured) {
+      html += '<div class="warnbox" style="margin-top:10px">' +
+        '<b>SP-API 还没配。</b>缺 ' +
+        (sp.missing_env || []).map(e => '<code>' + esc(e) + '</code>').join('、') +
+        '。<br>在配好之前，自家锚点只能手工填——手工填的数据一样能用，' +
+        '只是会过时，需要你定期回来改。' +
+        '<details style="margin-top:8px"><summary style="cursor:pointer">三项凭据去哪拿</summary>' +
+        '<pre style="white-space:pre-wrap;font-size:12px;line-height:1.7;margin:8px 0 0">' +
+        esc(sp.hint || '') + '</pre></details></div>';
+    } else {
+      html += '<div class="note" style="margin-top:8px">SP-API 已配置（region=' +
+        esc(sp.region || '') + '）。同步只写接口真能给的字段，' +
+        '拿不到的会逐条说明原因，不会覆盖成空。</div>';
+    }
+
+    html += '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">' +
+      '<button class="btn" id="bl-sync">从 SP-API 同步</button>' +
+      '<button class="btn sm" id="bl-sync-dry">先预览（不写库）</button></div>';
+  } else {
+    html += '<div class="note">这是 Mock 数据，但<b>不是凭空编的</b>：' +
+      '能反推的字段用卖家精灵的真实数据（价格、星级、评价数、日销估算、标题、' +
+      '主图、类目），反推拿不到的才模拟补充（库存、保本价、交期、目标毛利、' +
+      '子类排名、词表）。<br>这份锚点<b>只在 Mock 里有效</b>：' +
+      '真实模式不接受反推值，切过去会看到「未接入」和接入指引。</div>';
+  }
+
+  html += '<div class="kv" style="margin-top:10px">' +
+    '<span class="k">整批来源</span><span>' +
+      (d.anchor_empty
+        ? '<span class="dim">—（锚点还是空的，没有任何一批数据写进来过）</span>'
+        : esc(d.anchor_source_label || '未标注') +
+          (d.anchor_source ? ' <code>' + esc(d.anchor_source) + '</code>' : '')) +
+      '</span>' +
+    '<span class="k">逐格统计</span><span>' + esc(countText) + '</span>' +
+    '</div>';
+
+  if (d.blocked_reason) {
+    html += '<div class="warnbox" style="margin-top:10px"><b>这份锚点在真实模式下已停用。</b><br>' +
+      esc(d.blocked_reason) + '</div>';
+  }
+  if ((d.blocked_fields || []).length) {
+    html += '<div class="warnbox" style="margin-top:10px">这几格在真实模式下不算数：' +
+      d.blocked_fields.map(f => esc(f.label) + '（' + esc(f.origin_label || '') + '）').join('、') +
+      '</div>';
+  }
+
+  html += '<div id="bl-sync-result"></div>';
+  $('#bl-source').innerHTML = html;
+
+  const onSync = (dry) => act(async (ev) => {
+    const btn = ev.currentTarget;
+    const old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = dry ? '取数中…' : '同步中…';
+    try {
+      const res = await api('/api/panel/baseline/sync',
+        {dry_run: dry}, 'POST');
+      blRenderSyncResult(res, dry);
+      if (res.ok && !dry) {
+        toast('已同步 ' + Object.keys(res.written || {}).length + ' 个字段');
+        reloadAll();
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  }, dry ? '预览 SP-API 数据' : '从 SP-API 同步');
+
+  const b1 = $('#bl-sync'); if (b1) b1.onclick = onSync(false);
+  const b2 = $('#bl-sync-dry'); if (b2) b2.onclick = onSync(true);
+}
+
+function blRenderSyncResult(res, dry){
+  const box = $('#bl-sync-result');
+  if (!box) return;
+
+  if (!res.ok) {
+    box.innerHTML = '<div class="err" style="margin-top:10px">' +
+      '<div class="t">' + (dry ? '预览' : '同步') + '没成功</div>' +
+      '<div class="m">' + esc(res.error || '') + '</div>' +
+      ((res.missing_env || []).length
+        ? '<div class="m">缺：' + res.missing_env.map(e => '<code>' + esc(e) + '</code>').join('、') + '</div>'
+        : '') +
+      (res.hint ? '<details style="margin-top:6px"><summary style="cursor:pointer">补法</summary>' +
+        '<pre style="white-space:pre-wrap;font-size:12px;line-height:1.7">' + esc(res.hint) + '</pre></details>' : '') +
+      '</div>';
+    return;
+  }
+
+  const written = res.written || {};
+  const changed = res.changed || [];
+  const skipped = res.skipped || [];
+  const notes = res.notes || [];
+  const errors = res.errors || [];
+
+  const w = Object.keys(written);
+  box.innerHTML = '<div class="card" style="margin-top:10px">' +
+    '<div style="font-weight:700;margin-bottom:6px">' +
+      (dry ? '预览：能拿到这些（还没写库）' : '已写入 ' + w.length + ' 个字段') +
+      ' · 数据质量 ' + esc(res.data_quality || '—') + '</div>' +
+    (w.length
+      ? '<div class="kv">' + w.map(k =>
+          '<span class="k">' + esc(fieldZh(k)) + '</span><span>' +
+          esc(blFmtRaw(written[k])) + '</span>').join('') + '</div>'
+      : '<div class="dim">一个字段都没拿到。</div>') +
+    (changed.length
+      ? '<div class="note" style="margin-top:8px">覆盖了原来的值：' + changed.map(c =>
+          esc(fieldZh(c.field)) + ' ' + esc(String(c.before)) + ' → ' + esc(String(c.after))
+        ).join('；') + '</div>'
+      : '') +
+    (skipped.length
+      ? '<div class="note" style="margin-top:8px"><b>没写的字段及原因：</b><br>' +
+        skipped.map(s => esc(fieldZh(s.field)) + '：' + esc(s.reason)).join('<br>') + '</div>'
+      : '') +
+    (notes.length
+      ? '<div class="warnbox" style="margin-top:8px">' + notes.map(n => esc(n)).join('<br><br>') + '</div>'
+      : '') +
+    (errors.length
+      ? '<div class="warnbox" style="margin-top:8px"><b>这几段接口这轮失败了</b>' +
+        '（不是没有数据）：<br>' + errors.map(e => esc(e)).join('<br>') + '</div>'
+      : '') +
+    '</div>';
+}
+
+// 同步结果里的原始值：不猜类型，数组/对象转成短文本。
+function blFmtRaw(v){
+  if (Array.isArray(v)) return v.join(' › ');
+  if (v && typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
 // ── 锚点总览 ──────────────────────────────────────────────────
 function blRenderAnchor(bl){
   const a = bl.assessment || {};
   const b = bl.baseline || {};
   const caps = a.capabilities || {};
+  // 空锚点（一行数据都没有）和「填了但都是假设值」是两种状态，措辞必须分开。
+  const empty = !!(bl.data_source && bl.data_source.anchor_empty);
+  // 整行被当前模式拒掉时，就绪度和能力勾都不能照常显示：
+  // 「已停用」+「100% A 级 ✓ 跟价判断」同时出现在一张卡上，读的人只能挑一句信。
+  const usable = a.usable !== false;
   const capList = [
     ['can_tier', '分层（四同法则）'],
     ['can_judge_price_follow', '跟价判断'],
@@ -191,21 +371,32 @@ function blRenderAnchor(bl){
           esc(b.asin || '—') + '</div></div>' +
         '<div style="margin-left:auto;text-align:right">' +
           '<div class="dim" style="font-size:11.5px">锚点就绪度</div>' +
-          '<div class="big">' + (a.readiness === undefined ? '—' : a.readiness + '%') +
-          ' <span class="dim" style="font-size:13px;font-weight:400">' + esc(a.grade || '') +
-          ' 级</span></div></div>' +
-      '</div>' +
-      '<div class="bar ' + gradeCls + '" style="margin:12px 0 14px"><i style="width:' +
-        (a.readiness || 0) + '%"></i></div>' +
+          (usable
+            ? '<div class="big">' + (a.readiness === undefined ? '—' : a.readiness + '%') +
+              ' <span class="dim" style="font-size:13px;font-weight:400">' + esc(a.grade || '') +
+              ' 级</span></div>'
+            : '<div class="big" style="font-size:16px">不可用</div>' +
+              '<div class="dim" style="font-size:11.5px">当前模式下这份锚点被拒</div>') +
+        '</div></div>' +
+      '<div class="bar ' + (usable ? gradeCls : 'none') + '" style="margin:12px 0 14px"><i style="width:' +
+        (usable ? (a.readiness || 0) : 0) + '%"></i></div>' +
       '<div class="kv">' +
-        '<span class="k">数据来源</span><span>' + esc(b.source_label || '—') + '</span>' +
-        '<span class="k">可售天数</span><span>' + esc(dosText) +
-          ' <span class="dim">（' + esc(dosWord(a.inventory_status)) + '）</span></span>' +
+        '<span class="k">数据来源</span><span>' +
+          (empty
+            ? '<span class="dim">—（锚点还没填，谈不上来源）</span>'
+            : esc(b.source_label || '—')) + '</span>' +
+        '<span class="k">可售天数</span><span>' + esc(usable ? dosText : '—') +
+          ' <span class="dim">（' + esc(usable ? dosWord(a.inventory_status) : '锚点不可用，算出来也不作数') +
+          '）</span></span>' +
         '<span class="k">假设值</span><span>' +
           (b.assumed_fields && b.assumed_fields.length
             ? '<span class="assume-l">' + b.assumed_fields.map(f => esc(fieldZh(f))).join('、') +
               '</span>'
-            : '<span class="dim">无（全部字段都有实测或明确来源）</span>') +
+            : (empty
+                // 空锚点走这里如果写「全部字段都有实测」，就是拿一句漂亮话
+                // 盖住了「一格都没填」——页面上最不该出现的就是这种句子。
+                ? '<span class="dim">—（还没有任何字段，谈不上实测）</span>'
+                : '<span class="dim">无（已填的都有实测或明确来源）</span>')) +
         '</span>' +
       '</div>' +
       '<div class="caps">' + capList.map(([k, label]) =>
@@ -240,29 +431,49 @@ function blRenderDims(b){
   const groups = b.groups || [];
   const total = groups.reduce((s, g) => s + g.total, 0);
   const filled = groups.reduce((s, g) => s + g.filled, 0);
+  const mode = (BL_STATE && BL_STATE.data_source && BL_STATE.data_source.mode) || 'live';
   $('#bl-dims-note').textContent =
     '五大维度共 ' + total + ' 个字段，已填 ' + filled + ' 个。' +
-    '带「假设值」标记的格子，由它推导出的结论只能用来验证链路，不能用来做决定。';
+    '右边那一列是每一格的出身：' +
+    (mode === 'live'
+      ? 'SP-API 同步（后台来的，能重跑）· 手工（你填的，会过时）。反推值在真实模式下不出现。'
+      : '反推（卖家精灵真实数据）· 模拟（反推拿不到，编的）· 手工。') +
+    '带「假设值」的格子，由它推导出的结论只能用来验证链路，不能用来做决定。';
 
   $('#bl-dims').innerHTML = groups.map(g => {
     const ratio = g.total ? g.filled / g.total : 0;
     const cls = ratio >= 1 ? '' : (ratio > 0 ? 'part' : 'none');
-    const rows = (g.fields || []).map(f =>
-      '<div class="frow">' +
+    const live = ((BL_STATE && BL_STATE.data_source && BL_STATE.data_source.mode) || 'live') === 'live';
+    const rows = (g.fields || []).map(f => {
+      // 三个徽标互斥：假设值 > 来源 > 缺。
+      // 为什么要「来源」这一列：一整排数字看起来都很确定，只有逐格标出
+      // 「SP-API 同步 / 手工 / 反推 / 模拟」，读的人才分得清哪个能重跑、
+      // 哪个是他上个月手填的、哪个是编的。
+      const tag = f.filled
+        ? (f.assumed
+            ? '<span class="tag A" title="这不是实测值，是拍的或先占位的">假设值</span>'
+            : blOriginTag(f.origin))
+        : '<span class="dim" style="font-size:11px">缺</span>';
+      const hint = (!f.filled && f.live_hint)
+        ? '<div class="dim" style="font-size:11.5px;margin-top:2px">该从哪来：' + esc(f.live_hint) + '</div>'
+        : '';
+      return '<div class="frow">' +
         '<div class="l">' + esc(f.label) + '</div>' +
-        '<div class="v">' + blFieldValue(f) + '</div>' +
-        '<div>' + (f.assumed
-          ? '<span class="tag A" title="这不是实测值，是拍的或先占位的">假设值</span>'
-          : (f.filled ? '' : '<span class="dim" style="font-size:11px">缺</span>')) +
-        '</div>' +
-      '</div>').join('');
+        '<div class="v">' + blFieldValue(f) + hint + '</div>' +
+        '<div>' + tag + '</div>' +
+      '</div>';
+    }).join('');
+    const spapiN = (g.fields || []).filter(f => f.spapi).length;
     return '<div class="dimcard">' +
       '<div class="hd"><span class="n">' + esc(g.name) + '</span>' +
         '<span class="tag ' + (g.filled === g.total ? 'active' : 'B') + '">' +
           g.filled + '/' + g.total + '</span>' +
-        (g.auto_fillable
-          ? '<span class="dim" style="font-size:11px">可自动补</span>'
-          : '<span class="dim" style="font-size:11px">只能人填</span>') +
+        // 「SP-API 可给几格」从字段的来路表直接数出来，不用维度上的老布尔位：
+        // 那个位是"能不能用卖家精灵自动补"时代的产物，现在会误导——
+        // 它把「库存 SP-API 能给」说成「只能人填」。
+        '<span class="dim" style="font-size:11px">' +
+          (spapiN ? 'SP-API 可给 ' + spapiN + '/' + g.total : '只能人填') +
+        '</span>' +
         '<span class="c">' + (ratio >= 1 ? '齐了' : '差 ' + (g.total - g.filled) + ' 项') +
         '</span></div>' +
       '<div class="why">' + esc(g.why || '') + '</div>' +
@@ -276,8 +487,14 @@ function blRenderDims(b){
       '<span class="dim" style="font-size:11px;margin-left:auto">不计入就绪度</span></div>' +
       '<div class="why">不进五维评分，但「类目节点」这一维只认它；缺了就有一整维判不了。</div>' +
       b.extras.map(f => '<div class="frow"><div class="l">' + esc(f.label) + '</div>' +
-        '<div class="v">' + blFieldValue(f) + '</div><div>' +
-        (f.filled ? '' : '<span class="dim" style="font-size:11px">缺</span>') +
+        '<div class="v">' + blFieldValue(f) +
+        (!f.filled && f.live_hint
+          ? '<div class="dim" style="font-size:11.5px;margin-top:2px">该从哪来：' +
+            esc(f.live_hint) + '</div>'
+          : '') +
+        '</div><div>' +
+        (f.filled ? blOriginTag(f.origin)
+                  : '<span class="dim" style="font-size:11px">缺</span>') +
         '</div></div>').join('') + '</div>'
     : '');
 }

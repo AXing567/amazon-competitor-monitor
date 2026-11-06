@@ -103,6 +103,12 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("my_products", "source", "VARCHAR(24)"),     # manual / sellersprite_proxy / sp_api
     ("my_products", "assumed_fields", "JSON"),    # 哪些字段是假设值（字段名列表）
 
+    # my_products：字段级出身（见 models.MyProduct 第 6 节）。
+    # 为什么 `source` + `assumed_fields` 还不够：前者说整批、后者说真假，
+    # 都回答不了「这一格是接口同步来的还是我手填的」。真实模式下这两者的
+    # 可信度不同（接口能重跑、手填会过时），必须逐格记录。
+    ("my_products", "field_sources", "JSON"),
+
     # decisions：这张表建了快两轮，一行没写过。真要用起来，缺的不是写入动作，
     # 是「回看时看得懂」的那几列——没有 headline 就只剩 attack/no_action，
     # 没有 metrics 就算不出「当时日销要涨到 128 单才不亏」。

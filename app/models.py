@@ -112,6 +112,19 @@ class MyProduct(Base):
     # 不是一套审计系统。
     assumed_fields: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # `field_sources`：**每一格**自己的出身，{字段名: sp_api | manual |
+    # sellersprite | simulated}。和上面两列是三件事，别合并：
+    #
+    #     source          = "sp_api"      ← 这批数主要来自后台接口
+    #     assumed_fields  = [...]         ← 哪几个是拍的
+    #     field_sources   = {...}         ← 每一格到底谁写的
+    #
+    # 为什么非要有第三列：真实模式下 SP-API 同步来的价格能重跑、手填的价格会过时，
+    # 两者的可信度不是一回事。只有 `source` 一列时，面板上「SP-API 同步」四个字
+    # 会盖住四个手填字段——这正是本轮在修的那个错：
+    # **一列来源冒充整行来源**。
+    field_sources: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

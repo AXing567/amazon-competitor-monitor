@@ -40,7 +40,12 @@ from app.capabilities import call as cap_call                      # noqa: E402
 from app.capabilities import queries as queries_cap                # noqa: E402
 from app.capabilities import writes as writes_cap                  # noqa: E402
 from app.capabilities.types import SOURCE_PANEL, CapContext        # noqa: E402
-from app.db import get_session, init_db                            # noqa: E402
+from app.db import (                                              # noqa: E402
+    ensure_mode_ready,
+    get_session,
+    init_db,
+    using_data_mode,
+)
 from app.domain import baseline as bl                              # noqa: E402
 from app.migrations import migrate                                 # noqa: E402
 from app.models import MyProduct                                   # noqa: E402
@@ -99,7 +104,21 @@ def test_migrate_on_live_schema_is_noop():
 # ============================================================
 
 
-def test_set_baseline_roundtrips_source_and_assumed_fields():
+
+@pytest.fixture()
+def mock_mode():
+    """把这条用例切到 Mock 库。
+
+    卖家精灵反推是 **Mock 的构造方式**，不是真实模式的数据来源：
+    `pool.update_baseline` 在真实模式下会直接拒掉 `source=sellersprite_proxy`。
+    所以要验「反推锚点能不能存、能不能读回来」的用例，必须站在 Mock 模式下跑——
+    放在真实模式下，它验的是一个已经被禁止的写入。
+    """
+    ensure_mode_ready("mock")
+    with using_data_mode("mock"):
+        yield
+
+def test_set_baseline_roundtrips_source_and_assumed_fields(mock_mode):
     """走 `capabilities.call`（不是直接调 handler）——这条路径才证明 spec 补对了。
 
     `_coerce_params` 只认 `Capability.params` 里声明过的键，未声明的**静默丢弃**。
@@ -213,7 +232,7 @@ def test_source_rejects_unknown_value():
 # ============================================================
 
 
-def test_check_anchor_warns_about_assumed_fields():
+def test_check_anchor_warns_about_assumed_fields(mock_mode):
     """`check_anchor` 的告警要说清三件事：哪几个字段、哪些结论、去哪办。"""
     ctx = _ctx("warn")
     res = writes_cap.set_baseline(
@@ -293,7 +312,7 @@ def test_assess_without_provenance_attributes_does_not_break():
 # ============================================================
 
 
-def test_my_to_dict_exposes_provenance():
+def test_my_to_dict_exposes_provenance(mock_mode):
     """`_my_to_dict` 必须带出 `source` 与 `assumed_fields`。
 
     没有这条断言，很容易出现"库里有了、面板没有"：

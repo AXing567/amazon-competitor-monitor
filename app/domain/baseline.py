@@ -144,16 +144,6 @@ FIELD_LABELS: dict[str, str] = {
 }
 
 
-# ============================================================
-# 假设值：形状校验与措辞
-#
-# 校验只有这一份实现，写入层（`capabilities.writes.set_baseline`）和
-# 兜底层（`services.pool.update_baseline`，它还有两个非能力层调用方）都调它。
-# 为什么不在两处各写一遍：两处一旦分叉，就会出现「面板能存、API 存不进去」
-# 或者更糟的「一边校验、一边静默放过」——而后者不会报错。
-# ============================================================
-
-
 def coerce_assumed_fields(raw) -> list[str]:
     """把 `assumed_fields` 归一成「去重后的非空字符串列表」。
 
@@ -235,6 +225,201 @@ def assumed_warning(fields: list[str]) -> str:
         + "，只能用于验证链路是否跑通。请先把真实数据补齐，"
         "再拿结论做决定——否则它看起来和真的没有区别。"
     )
+
+
+# ============================================================
+# 每个字段该从哪来
+#
+# 这张表是本轮的核心：**自家数据只有两个合法来源 —— SP-API 与手工**。
+# 卖家精灵反推能拿到价格/星级/评价/类目这些公开数据，但那是「别人家的商品页」，
+# 不是「我家后台的账」；把两者混在一张表里，一个月后没人分得清哪个数是查来的。
+#
+# 所以每个字段都写清三件事：
+#   1. SP-API 能不能给（给的话是哪一段接口）
+#   2. 给不了的话，手工从哪张单据/哪个后台取
+#   3. 公开数据能不能反推（只用于 Mock 的构造方法，不作为真实模式的数据来源）
+#
+# 表里漏一个字段，面板上就会空一格「该从哪来」——所以有一条测试逐字段扫。
+# ============================================================
+
+#: 字段级来源取值（与 `MyProduct.field_sources` 存的值一致）
+ORIGIN_SP_API = "sp_api"
+ORIGIN_MANUAL = "manual"
+ORIGIN_SELLERSPRITE = "sellersprite"
+ORIGIN_SIMULATED = "simulated"
+
+ORIGIN_LABELS: dict[str, str] = {
+    ORIGIN_SP_API: "SP-API 同步",
+    ORIGIN_MANUAL: "手工录入",
+    ORIGIN_SELLERSPRITE: "卖家精灵反推",
+    ORIGIN_SIMULATED: "模拟补充",
+}
+
+#: 真实模式接受的字段来源。反推与模拟只能出现在 Mock。
+#:
+#: 这不是洁癖：反推出来的库存与保本价会直接进「该不该跟价」的判断，
+#: 而它在面板上和真值长得一模一样——错的不是数值，是它的身份。
+LIVE_FIELD_ORIGINS: tuple[str, ...] = (ORIGIN_SP_API, ORIGIN_MANUAL)
+
+#: 真实模式接受的**整行**来源（`MyProduct.source`）。两者是两层：
+#: 整行 source 说明这批数主要怎么来的，字段级 origin 说明每一格怎么来的。
+LIVE_SOURCES: tuple[str, ...] = (SOURCE_MANUAL, SOURCE_SP_API)
+
+
+@dataclass(frozen=True)
+class FieldOrigin:
+    """一个锚点字段的来路。
+
+    `spapi` 为 None 表示 **SP-API 结构上给不了**（不是这轮失败了）：
+    成本、保本价、目标毛利、补货周期是卖家自己的账，任何接口都拿不到；
+    星级和评价数只在商品页上，SP-API 不提供。
+    """
+
+    field: str
+    spapi: Optional[str]
+    manual: str
+    #: 公开数据（商品页/第三方工具）能不能反推出来。**只用于 Mock 的构造方法**：
+    #: 真实模式下反推值不算自家数据，见 `live_block_reason`。
+    sellersprite: bool
+
+    @property
+    def label(self) -> str:
+        return FIELD_LABELS.get(self.field, self.field)
+
+    @property
+    def live_hint(self) -> str:
+        """真实模式下这个字段该怎么填——面板上直接显示这句话。"""
+        if self.spapi:
+            return f"SP-API：{self.spapi}；或{self.manual}"
+        return f"只能手工：{self.manual}"
+
+
+FIELD_ORIGINS: dict[str, FieldOrigin] = {
+    o.field: o
+    for o in (
+        FieldOrigin(
+            "fba_available_units",
+            "FBA Inventory · getInventorySummaries（fulfillableQuantity）",
+            "库存台账（FBA 在途/待入仓要另外加）",
+            sellersprite=False,
+        ),
+        FieldOrigin(
+            "daily_sales_avg",
+            "Sales · getOrderMetrics（近 30 日下单件数 ÷ 30）",
+            "订单报表按日汇总",
+            sellersprite=True,   # 卖家精灵按 BSR 幂律模型估的，是估算不是订单
+        ),
+        FieldOrigin(
+            "lead_time_days",
+            None,
+            "采购合同交期 + 头程时效（工厂到 FBA 仓）",
+            sellersprite=False,
+        ),
+        FieldOrigin(
+            "current_price",
+            "Pricing · getItemOffers（取本店那条的 ListingPrice；到手价用 BuyBox 价）",
+            "后台售价（含券后价要说清是哪个）",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "break_even_price",
+            None,
+            "成本表：采购价 + 头程 + FBA 配送费 + 佣金 + 退货损耗",
+            sellersprite=False,  # 选品库的毛利率是它自己那套成本模型的估算
+        ),
+        FieldOrigin(
+            "target_margin_rate",
+            None,
+            "经营目标（老板定的，不是算出来的）",
+            sellersprite=False,
+        ),
+        FieldOrigin(
+            "sub_category_rank",
+            "Catalog Items · salesRanks（注意：返回的是某个排名组，未必是子类）",
+            "商品页「Best Sellers Rank」里的子类那一行",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "rating",
+            None,                # SP-API 不提供
+            "商品页星级（自家 ASIN 的公开页）",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "review_count",
+            None,
+            "商品页评价数（自家 ASIN 的公开页）",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "core_keywords",
+            None,
+            "广告「搜索词报告」按曝光/点击排序取 Top80%；或卖家精灵反查后人工核",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "title",
+            "Catalog Items · getCatalogItem（summaries[].itemName）",
+            "后台 listing 文案",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "image_url",
+            "Catalog Items · getCatalogItem（images[].link）",
+            "后台主图",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "bullet_points",
+            "Catalog Items · getCatalogItem（attributes.bullet_point）",
+            "后台五点描述",
+            sellersprite=True,
+        ),
+        FieldOrigin(
+            "category_path",
+            "Catalog Items · getCatalogItem（classifications，不保证是完整链）",
+            "后台类目 + 商品页面包屑",
+            sellersprite=True,
+        ),
+    )
+}
+
+
+def field_origin(name: str) -> Optional[FieldOrigin]:
+    return FIELD_ORIGINS.get(name)
+
+
+def live_field_block_reason(origin: Optional[str]) -> Optional[str]:
+    """字段级：这个来源在真实模式下能不能用。不能用时给出原因。"""
+    if origin in (None, ""):
+        return None
+    if origin in LIVE_FIELD_ORIGINS:
+        return None
+    label = ORIGIN_LABELS.get(origin, origin)
+    return (
+        f"这个值是{label}来的。真实模式只接受 SP-API 同步或手工录入——"
+        "反推出来的数看着和真值一样，但它不是你家后台的账。"
+    )
+
+
+def live_block_reason(source: Optional[str]) -> Optional[str]:
+    """整行锚点在真实模式下能不能用。能用返回 None，不能用返回原因。
+
+    为什么要在**整行**这一层再拦一次，而字段级已经拦过：
+    整行 `source` 决定了「这批数的身份」，字段级 `origin` 是逐格标注。
+    两者都可能是脏的（历史数据只填了 source 没填 field_sources），
+    任何一层放过都会让反推值进判断。
+    """
+    if source in (None, "") or source in LIVE_SOURCES:
+        return None
+    if source == SOURCE_SELLERSPRITE:
+        return (
+            "这组数是用卖家精灵反推的：价格、排名、星级、评价数来自别人家的商品页，"
+            "库存与保本价是估的。真实模式不接受这份锚点——"
+            "它看起来和真值没有区别，但它不是你家后台的账。"
+        )
+    label = SOURCE_LABELS.get(source, source)
+    return f"锚点来源是「{label}」，真实模式只接受 SP-API 同步或手工录入。"
 
 
 # ============================================================
@@ -377,8 +562,17 @@ def _json_safe(value):
     return str(value)
 
 
-def _field_row(my_product, name: str, label: str, assumed: set[str]) -> dict:
+def _field_row(
+    my_product,
+    name: str,
+    label: str,
+    assumed: set[str],
+    *,
+    field_sources: Optional[dict] = None,
+) -> dict:
     raw = getattr(my_product, name, None)
+    origin = (field_sources or {}).get(name)
+    meta = FIELD_ORIGINS.get(name)
     return {
         "name": name,
         "label": label,
@@ -386,11 +580,22 @@ def _field_row(my_product, name: str, label: str, assumed: set[str]) -> dict:
         "value": _json_safe(raw),
         "filled": _has_value(raw),
         "assumed": name in assumed,
+        # ---- 这一格的数据是从哪来的 ----
+        # 整行 `source` 只说明「这批数主要怎么来的」，说明不了这一格。
+        # 没有 origin 时**不猜成 manual**：猜错了就是给一个反推值盖了个真章。
+        "origin": origin,
+        "origin_label": ORIGIN_LABELS.get(origin) if origin else None,
+        "origin_known": origin is not None,
+        # ---- 这一格在真实模式下该怎么填 ----
+        "spapi": meta.spapi if meta else None,
+        "manual_hint": meta.manual if meta else None,
+        "live_hint": meta.live_hint if meta else "来源未定义（FIELD_ORIGINS 漏了这个字段）",
+        "sellersprite_can": meta.sellersprite if meta else False,
     }
 
 
-def describe(my_product) -> dict:
-    """把锚点摊平成「每个字段一行」：值、类型、是否已填、是不是假设值。
+def describe(my_product, *, field_sources: Optional[dict] = None) -> dict:
+    """把锚点摊平成「每个字段一行」：值、类型、是否已填、是不是假设值、从哪来。
 
     ## 整行 `source` 与字段级 `assumed_fields` 谁说话
 
@@ -404,13 +609,23 @@ def describe(my_product) -> dict:
     所以一个字段先看它在不在 `assumed_fields` 里，再退回看 `source`。
     反过来（先信 source）会让保本价显示成「卖家精灵反推」，那是**假溯源**，
     比不标来源更糟。
+
+    ## `field_sources` 是第三层，也是最细的一层
+
+    `assumed_fields` 只回答「是不是拍的」，回答不了「这个数是 SP-API 同步来的
+    还是我手填的」。真实模式下这两者的可信度完全不同（API 来的可以重跑，
+    手填的会过时），所以逐字段要多一个 `origin`。
     """
     assumed = set(read_assumed_fields(getattr(my_product, "assumed_fields", None)))
     source = getattr(my_product, "source", None)
+    kwargs = {"field_sources": field_sources}
 
     groups: list[dict] = []
     for dim in DIMENSIONS:
-        rows = [_field_row(my_product, name, label, assumed) for name, label in dim.fields]
+        rows = [
+            _field_row(my_product, name, label, assumed, **kwargs)
+            for name, label in dim.fields
+        ]
         groups.append(
             {
                 "key": dim.key,
@@ -428,7 +643,9 @@ def describe(my_product) -> dict:
     # 但它是分层节点维度的**唯一**输入，属于「不填就有一整个维度判不了」的那种字段。
     # 放在 extras 而不是硬塞进某个维度：塞进去会改变就绪度分母，
     # 让历史报告里的 73.3 变成一个和当时不同的分数。
-    extras = [_field_row(my_product, "category_path", "自家类目路径", assumed)]
+    extras = [
+        _field_row(my_product, "category_path", "自家类目路径", assumed, **kwargs)
+    ]
 
     return {
         "asin": getattr(my_product, "asin", "") or "",

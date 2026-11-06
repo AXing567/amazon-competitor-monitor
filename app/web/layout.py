@@ -106,6 +106,13 @@ td.dim,.dim{color:var(--muted)}
 .tag.defend{background:#dbeafe;color:#1e40af}
 .tag.learn{background:#ede9fe;color:#5b21b6}
 .tag.no_action{background:#f3f4f6;color:#4b5563}
+/* 字段级出身：四档来源各一色。为什么不用四种鲜艳色：
+   这一列是**备注**不是结论，抢眼会盖过左边真正的值和上面红色的缺失提示。 */
+.tag.sp_api{background:#dcfce7;color:#166534}
+.tag.manual{background:#e5e7eb;color:#4b5563}
+.tag.sellersprite{background:#dbeafe;color:#1e40af}
+.tag.simulated{background:#fef3c7;color:#92400e}
+.tag.nokind{background:#fee2e2;color:#991b1b}
 @media (prefers-color-scheme: dark){
   .tag.S{background:#3f1d20;color:#fca5a5}
   .tag.A{background:#3d2716;color:#fdba74}
@@ -119,6 +126,11 @@ td.dim,.dim{color:var(--muted)}
   .tag.defend{background:#17293f;color:#93c5fd}
   .tag.learn{background:#2a2342;color:#c4b5fd}
   .tag.no_action{background:#252a32;color:#9ca3af}
+  .tag.sp_api{background:#12321f;color:#6ee7b7}
+  .tag.manual{background:#252a32;color:#9ca3af}
+  .tag.sellersprite{background:#17293f;color:#93c5fd}
+  .tag.simulated{background:#3a2f10;color:#fcd34d}
+  .tag.nokind{background:#3f1d20;color:#fca5a5}
 }
 
 .lvl{font-size:11px;font-weight:800;padding:1px 6px;border-radius:4px;color:#fff}

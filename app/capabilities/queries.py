@@ -36,7 +36,7 @@ from app.capabilities.types import (
     T_ENUM,
     T_INT,
 )
-from app.db import get_session
+from app.db import DATA_MODE_LIVE, get_data_mode, get_session
 from app.domain import baseline as baseline_mod
 from app.domain.thresholds import GROUPS, GROUP_TITLES, spec_groups
 from app.models import Action, Competitor, Decision, MyProduct, Signal, Snapshot, User
@@ -48,6 +48,7 @@ from app.services import (
     health,
     identity,
     pool,
+    self_sync,
     settings_store,
 )
 
@@ -485,7 +486,12 @@ def check_anchor(ctx: CapContext) -> dict:
 
 
 def get_baseline(ctx: CapContext) -> dict:
-    """自家锚点的完整明细：每个字段的值 / 类型 / 是否假设值，外加体检与能力边界。"""
+    """自家锚点的完整明细：每个字段的值 / 类型 / 是否假设值 / **从哪来**，外加体检与能力边界。
+
+    `data_source` 块是这一版新增的：真实模式下要回答「我的数据接进来了吗、
+    缺哪几项、每项该从哪拿」。只给字段值是不够的——值齐全但全是卖家精灵反推的，
+    看起来和"接入完成"一模一样。
+    """
     with get_session() as s:
         my = _my_product_row(ctx.tenant_id, s)
         if my is None:
@@ -493,19 +499,108 @@ def get_baseline(ctx: CapContext) -> dict:
                 "ok": True,
                 "exists": False,
                 "message": "尚未设置自家锚点，系统现在无法判断任何一个竞品。",
-                "hint": "先填三个数：当前售价、保本价、日均销量。",
+                "hint": "两条路：① 配好 SP-API 后点「从 SP-API 同步」；② 手工填。"
+                        "先填三个数就能跑起来：当前售价、保本价、日均销量。",
                 "baseline": None,
                 "assessment": None,
+                "data_source": {
+                    "mode": get_data_mode(),
+                    "anchor_source": None,
+                    "anchor_source_label": None,
+                    "blocked_reason": None,
+                    "blocked_fields": [],
+                    # 形状要和有锚点那条分支一致：缺键会让前端拿到 undefined，
+                    # 而 `undefined` 在 JS 里既不是 true 也不是 false，判断全靠运气。
+                    "usable": True,
+                    "counts": {},
+                    "filled": 0,
+                    "anchor_empty": True,
+                    "spapi": self_sync.status(),
+                },
             }
         # 两个都要在会话里算完：对象出 with 之后不能保证还能访问属性
-        detail = baseline_mod.describe(my)
+        detail = baseline_mod.describe(my, field_sources=my.field_sources)
         assessment = baseline_mod.assess(my).to_dict()
+        anchor_source = my.source or baseline_mod.SOURCE_MANUAL
+        spapi = self_sync.status()
+
+    mode = get_data_mode()
+    live = mode == DATA_MODE_LIVE
+    anchor_blocked = baseline_mod.live_block_reason(anchor_source) if live else None
+
+    # 整行被拒时，体检结论也必须跟着翻成「不可用」。
+    #
+    # 不翻的话页面会同时印两句话：「这份锚点在真实模式下已停用」和
+    # 「就绪度 100% A 级 · ✓ 跟价判断 ✓ 进攻窗口」。两句都来自同一份数据，
+    # 读的人只能挑一句信——而通常他会挑那句让他舒服的。
+    #
+    # 只改**能力边界**，不改 readiness：就绪度是"填了几个字段"的事实，
+    # 字段确实填了。把事实改小，下次有人拿它算别的又会错。
+    if anchor_blocked:
+        assessment["usable"] = False
+        assessment["blocked_reason"] = anchor_blocked
+        assessment["capabilities"] = {
+            k: False for k in (assessment.get("capabilities") or {})
+        }
+        assessment["warnings"] = [anchor_blocked] + list(assessment.get("warnings") or [])
+    else:
+        assessment["usable"] = True
+
+    # 真实模式下：反推/模拟值的字段不算数，要单独点出来。
+    # 这一层是兜底——写入口已经拦了，但历史数据和直接改库绕得过。
+    blocked_fields = []
+    counts: dict[str, int] = {}
+    filled = 0
+    # 分组字段 + extras（`category_path`）一起数。extras 不计入就绪度，
+    # 但它照样是面板上的一格、照样有出身——统计时把它排掉，
+    # 就会出现「逐格统计：还没有任何字段」而页面上明明填着类目路径。
+    for row in detail["groups"] + [{"fields": detail["extras"]}]:
+        for f in row["fields"]:
+            # 只统计**有值**的格子。空格子的 origin 是 None，把它算成
+            # 「来源未标注」会让一个从没填过的锚点显示「未标注 13」——
+            # 读起来像"有人填了但忘了记来源"，实际是"一格都没填"。
+            if not f.get("filled"):
+                continue
+            filled += 1
+            origin = f.get("origin") or "unknown"
+            counts[origin] = counts.get(origin, 0) + 1
+
+    # 「一行都没有」和「有行但全空」在库里长得一样（都是 source='manual'），
+    # 但在页面上是两件事：前者该说「还没填」，后者才能说「手工录入」。
+    # 光看 source 判断会把一个空壳报成「已用真实数据接入」。
+    for row in detail["groups"] + [{"fields": detail["extras"]}]:
+        for f in row["fields"]:
+            reason = baseline_mod.live_field_block_reason(f.get("origin")) if live else None
+            if reason:
+                blocked_fields.append(
+                    {
+                        "field": f["name"],
+                        "label": f["label"],
+                        "origin": f.get("origin"),
+                        "origin_label": f.get("origin_label"),
+                        "reason": reason,
+                    }
+                )
 
     return {
         "ok": True,
         "exists": True,
         "baseline": detail,
         "assessment": assessment,
+        "data_source": {
+            "mode": mode,
+            "anchor_source": anchor_source,
+            "anchor_source_label": baseline_mod.SOURCE_LABELS.get(
+                anchor_source, anchor_source
+            ),
+            "blocked_reason": anchor_blocked,
+            "blocked_fields": blocked_fields,
+            "usable": anchor_blocked is None,
+            "counts": counts,
+            "filled": filled,
+            "anchor_empty": filled == 0,
+            "spapi": spapi,
+        },
     }
 
 

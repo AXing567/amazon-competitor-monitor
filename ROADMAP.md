@@ -96,11 +96,20 @@ bridge 里有一个 `/api/v1/competitor/monitor-summary` 聚合接口，一次�
 
 **目标**：让四同法则在真实数据上跑出符合直觉的结果。
 
-- [ ] 用自家 ASIN 跑 `prefill_from_snapshot`，自动补价格/排名/评分/核心词
-- [ ] 人工补三样自动拿不到的：保本价、日均销量、FBA 库存
+- [ ] **[需你操作]** 配 SP-API 三项凭据（`SPAPI_REFRESH_TOKEN` / `SPAPI_CLIENT_ID` /
+      `SPAPI_CLIENT_SECRET`），点面板上的「从 SP-API 同步」——它只写接口真能给的六项
+      （库存 / 日销 / 到手价 / 标题 / 主图 / 类目）
+- [ ] 人工补接口结构上给不出的：保本价、目标毛利率、交期、子类 BSR、词表
 - [ ] 加 3~5 个真实竞品，看分层结果
 - [ ] 挑 1 个被系统**拒绝入池**的，人工判断它到底算不算竞品——
       如果系统错了，调 `KEYWORD_OVERLAP_GATE` 或补 `functional_match`
+
+> **2026-11-06 修正**：Originally 第一条写的是「用自家 ASIN 跑
+> `prefill_from_snapshot`，自动补价格/排名/评分/核心词」。这条**现在是错的**，
+> 也是这轮 bug 的来源：`prefill_from_snapshot` 拿的是卖家精灵反推的公开数据，
+> 写进自家锚点之后，和"真接入了后台"长得一模一样。真实模式下它已被禁用
+> （`_autofill()` 整段不跑，写入口也拒 `sellersprite_proxy`）。
+> 反推只用于 **Mock** 的构造。
 
 **完成标志**：分层结果与人工判断一致 ≥4/5，不一致的能说清为什么。
 

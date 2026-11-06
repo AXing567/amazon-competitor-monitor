@@ -191,6 +191,15 @@ class SpApiNotConfigured(SpApiError):
 # ------------------------------------------------------------------
 
 
+def env_name(field: str) -> str:
+    """配置字段名 → 环境变量名。
+
+    面板上要说「缺 SPAPI_REFRESH_TOKEN」而不是「缺 refresh_token」——后者让人
+    不知道去哪填。映射只存在于 `_HINTS` 一处，这里只是读它，不另抄一份。
+    """
+    return SpApiNotConfigured._HINTS.get(field, (field.upper(), ""))[0]
+
+
 class SpApiAdapter:
     """自家数据适配器。一次 `fetch_self_snapshot` = 一组分段请求。
 
