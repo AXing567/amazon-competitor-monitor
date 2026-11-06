@@ -39,7 +39,7 @@ SECTION = """
     <h2 class="sec">待复盘 <span class="dim" id="r-count"></span></h2>
     <div class="note" style="margin-top:-4px">
       动作记下来时填了「几天后回看」的，到期会出现在这里。
-      系统只把**动作前后的指标**并排放好，有效/无效由人判——
+      系统只把<b>动作前后的指标</b>并排放好，有效/无效由人判——
       同一个「对手降价 10%」，对不同策略是好是坏完全相反，机器判不了。
     </div>
     <div id="r-list"><div class="empty">加载中…</div></div>
