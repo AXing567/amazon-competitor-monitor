@@ -19,10 +19,10 @@
 │   L5A 交互·推送   app/channels/ + app/agent/ + 飞书 webhook        │
 │                   发卡片、发文本、听懂人话 → 选能力 → 说人话        │
 │   L5B 交互·面板   app/web/ + app/api/routes/                       │
-│                   五个视图、单文件 HTML、REST 出口                  │
+│                   六个视图、单文件 HTML、REST 出口                  │
 ├────────────────────────────────────────────────────────────────────┤
 │ L4 能力层   app/capabilities/                                      │
-│             33 个能力 + 唯一入口 call(name, *, ctx, **kwargs)       │
+│             37 个能力 + 唯一入口 call(name, *, ctx, **kwargs)       │
 │             参数校验 · 身份携带 · 返回包装 —— 不写业务判断          │
 ├────────────────────────────────────────────────────────────────────┤
 │ L3 编排层   app/services/                                          │
@@ -47,7 +47,7 @@
 | L5A | `app/channels/` | 渠道契约 `base` 、卡片渲染 `render`、分发 `router`、飞书实现 |
 | L5A | `app/agent/` | `llm.py` 听懂→选能力→说人话；`tools.py` 薄适配层（schema + 转发） |
 | L5A | `app/api/server.py` 的 `/feishu/webhook`、`/api/chat` | 对话入口；只做验证 + 塞后台 |
-| L5B | `app/web/` | `layout` 外壳、`views/` 五视图、`panel.py` 拼装 |
+| L5B | `app/web/` | `layout` 外壳、`views/` 六视图、`panel.py` 拼装 |
 | L5B | `app/api/routes/` | `panel` / `config` / `capabilities` / `identity` 四组 REST 出口 |
 | L5B | `app/api/deps.py` | `X-User-Id` → `CapContext`，**全项目唯一解析身份的地方** |
 | L4 | `app/capabilities/` | `types` `queries` `writes` `judgments` + 注册表与 `call()` |
@@ -361,7 +361,7 @@ class Channel(ABC):
 | POST | `/api/dataset/mock/rebuild` | 重建 Mock 数据集 |
 | GET | `/api/panel/context` | 当前租户、操作人、自家产品（产品层阈值要用 `my_product_id`） |
 | GET | `/api/panel/board` | 看板：四个数字卡 + 竞品表（含每个竞品的最近一次变化） |
-| GET | `/api/panel/competitors/{asin}/changes` | 单个竞品的三条时间线（快照/信号/动作） |
+| GET | `/api/panel/competitors/{asin}/changes` | 单个竞品的四条时间线（快照/信号/判断/动作） |
 | GET | `/api/panel/pool` | 池子清单（可多选状态过滤） |
 | POST | `/api/panel/pool/{asin}/status` | 改状态：active / paused / archived |
 | GET | `/api/panel/actions` | 动作时间线（默认只看 `X-User-Id` 本人，`user_id=all` 看全团队） |
@@ -374,7 +374,7 @@ class Channel(ABC):
 | POST | `/api/config/thresholds/rollback` | 回滚（追加新版本） |
 | POST | `/api/config/thresholds/simulate` | 历史快照试算（dry-run，零写入） |
 | GET | `/api/config/thresholds/explain` | 当前阈值的人话说明 |
-| GET | `/api/cap` | 能力清单（33 个，自描述） |
+| GET | `/api/cap` | 能力清单（37 个，自描述） |
 | POST | `/api/cap/{name}` | 调用任意 `shared` 能力 |
 | GET | `/api/users` `/api/bindings` | 用户 / 身份 / 绑定 |
 | POST | `/api/actions/callback` | 飞书卡片按钮回调（未配密钥 → fail-closed） |

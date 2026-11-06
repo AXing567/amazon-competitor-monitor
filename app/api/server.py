@@ -12,7 +12,7 @@
 
 | 前缀 | 归属 | 说明 |
 |---|---|---|
-| `/api/panel/*` | T05 面板 | 五个视图的聚合端点 |
+| `/api/panel/*` | T05 面板 | 六个视图的聚合端点 |
 | `/api/config/*` | `app/api/routes/config.py` | 阈值配置 7 个端点 |
 | `/api/cap/*` | `app/api/routes/capabilities.py` | 通用能力分发（33 个能力共用 3 个端点） |
 | `/api/users` `/api/bindings` | `app/api/routes/identity.py` | 用户 / 身份 / 绑定 |
@@ -229,7 +229,7 @@ async def api_chat(body: ChatBody) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    """面板入口（五个视图，单文件 HTML，零外链）。
+    """面板入口（六个视图，单文件 HTML，零外链）。
 
     刻意**不跳转**到 `/panel`：请求 `/` 拿到 200 的一个页面，是运维最想看到的信号。
     数据源全挂的时候这一页也能打开——它只依赖 `/api/panel/*`，而那些端点

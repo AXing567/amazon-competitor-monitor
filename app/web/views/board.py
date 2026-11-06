@@ -172,6 +172,7 @@ async function toggleDetail(asin){
 function renderChanges(res){
   const snaps = (res.snapshots || []).slice(0, 30);
   const sigs = res.signals || [];
+  const decs = res.decisions || [];
   const acts = res.actions || [];
 
   const snapRows = snaps.map(x => `<tr>
@@ -199,6 +200,18 @@ function renderChanges(res){
     <td>${esc(x.description || '')}<div class="dim" style="font-size:11.5px">${esc(x.reason || '')}</div></td>
   </tr>`).join('');
 
+  const decRows = decs.map(x => `<tr>
+    <td class="dim">${dt(x.at)}</td>
+    <td><span class="tag ${esc(x.decision || '')}">${esc(x.decision_label || x.decision || '')}</span></td>
+    <td>${esc(x.headline || '')}
+      ${(x.reasons || []).length
+        ? '<div class="dim" style="font-size:11.5px">' + (x.reasons || []).map(esc).join('　·　') + '</div>'
+        : ''}</td>
+    <td class="dim">${esc(x.origin_label || '')}${x.signal_id ? ' · 信号 #' + x.signal_id : ' · 无信号'}</td>
+    <td class="num dim">${x.confidence === null || x.confidence === undefined
+      ? '—' : Math.round(x.confidence * 100) + '%'}</td>
+  </tr>`).join('');
+
   return `<div class="sub">
     <h2 class="sec" style="margin-top:6px">快照（${snaps.length} 条）</h2>
     ${snaps.length ? `<table><thead><tr><th>时间</th><th>净价</th><th>标价</th><th>排名</th>
@@ -207,6 +220,11 @@ function renderChanges(res){
     <h2 class="sec">信号（${sigs.length} 条）</h2>
     ${sigs.length ? `<table><thead><tr><th>时间</th><th>级别</th><th>类型</th><th>说明</th></tr></thead>
       <tbody>${sigRows}</tbody></table>` : '<div class="empty">没有信号。</div>'}
+    <h2 class="sec">判断（${decs.length} 条）</h2>
+    ${decs.length ? `<table><thead><tr><th>时间</th><th>结论</th><th>一句话 / 理由</th>
+      <th>来源</th><th>确定性</th></tr></thead><tbody>${decRows}</tbody></table>`
+      : '<div class="empty">没有判断记录。这一栏读的是落库的判断，不是当场重算的：'
+        + '锚点改了、阈值改了，这里也不会变，因为存的是当时看到的东西。</div>'}
     <h2 class="sec">动作（${acts.length} 条）</h2>
     ${acts.length ? `<table><thead><tr><th>时间</th><th>谁</th><th>类型</th><th>做了什么 / 依据</th></tr></thead>
       <tbody>${actRows}</tbody></table>` : '<div class="empty">还没记过动作。</div>'}

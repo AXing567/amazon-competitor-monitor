@@ -321,49 +321,9 @@ def latest_for_signal(tenant_id: str, signal_id: int) -> Optional[dict]:
         return to_dict(row, competitor_asin=comp.asin if comp else None)
 
 
-def list_for_competitor(
-    tenant_id: str,
-    competitor_id: int,
-    *,
-    days: int = 90,
-    limit: int = 50,
-) -> list[dict]:
-    since = datetime.now() - timedelta(days=max(1, int(days)))
-    with get_session() as s:
-        rows = list(
-            s.execute(
-                select(Decision)
-                .where(
-                    Decision.tenant_id == tenant_id,
-                    Decision.competitor_id == int(competitor_id),
-                    Decision.created_at >= since,
-                )
-                .order_by(desc(Decision.created_at), desc(Decision.id))
-                .limit(max(1, int(limit)))
-            ).scalars()
-        )
-        comp = s.get(Competitor, int(competitor_id))
-        return [to_dict(r, competitor_asin=comp.asin if comp else None) for r in rows]
-
-
-def stats(tenant_id: Optional[str] = None) -> dict:
-    """给面板/健康页看的概览：总条数、按结论分布、最近一条时间。"""
-    with get_session() as s:
-        stmt = select(Decision)
-        if tenant_id:
-            stmt = stmt.where(Decision.tenant_id == tenant_id)
-        rows = list(s.execute(stmt).scalars())
-        by_decision: dict[str, int] = {}
-        latest: Optional[datetime] = None
-        for r in rows:
-            by_decision[r.decision] = by_decision.get(r.decision, 0) + 1
-            if r.created_at and (latest is None or r.created_at > latest):
-                latest = r.created_at
-        return {
-            "total": len(rows),
-            "by_decision": by_decision,
-            "by_label": {
-                DECISION_LABELS.get(k, k): v for k, v in by_decision.items()
-            },
-            "latest_at": latest.isoformat(timespec="seconds") if latest else None,
-        }
+# 这里原来还有 `list_for_competitor` 和 `stats` 两个函数，都没人调，已删。
+# - 「按竞品看判断历史」交给 `get_change_history` 的第四条时间线：它在**同一个
+#   session** 里和快照/信号/动作一起查。删掉重复实现，是为了不让两份查询逻辑
+#   慢慢分叉——那正是「同一批数据、两条路给出不同结论」的老毛病。
+# - `stats`（总条数、按结论分布）在等一个真实的调用方。现在没有页面要显示它，
+#   写完挂着就是第二份「建了但没出口」。等做「复盘效果聚合」时和它的调用方一起加。

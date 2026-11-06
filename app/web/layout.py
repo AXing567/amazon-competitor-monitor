@@ -10,7 +10,7 @@
 ## 分层
 
     layout.py        外壳：CSS、静态骨架、核心 JS（工具函数 + 路由 + 故障隔离）
-    views/*.py       五个视图：各自的 section HTML + loadXxx() 加载函数
+    views/*.py       六个视图：各自的 section HTML + loadXxx() 加载函数
     panel.py         拼装 + lru_cache
 
 ## 面板的职责边界（红线）
@@ -100,6 +100,12 @@ td.dim,.dim{color:var(--muted)}
 .tag.active{background:#dcfce7;color:#166534}
 .tag.paused{background:#f3f4f6;color:#4b5563}
 .tag.archived{background:#e5e7eb;color:#6b7280}
+/* 判断结论用四种颜色。不复用 .tag.S/.tag.B 那套分层色：
+   同一块页面上「B 级竞品」和「防守」如果都是蓝底，读的人会以为它们是一回事。 */
+.tag.attack{background:#fee2e2;color:#991b1b}
+.tag.defend{background:#dbeafe;color:#1e40af}
+.tag.learn{background:#ede9fe;color:#5b21b6}
+.tag.no_action{background:#f3f4f6;color:#4b5563}
 @media (prefers-color-scheme: dark){
   .tag.S{background:#3f1d20;color:#fca5a5}
   .tag.A{background:#3d2716;color:#fdba74}
@@ -109,6 +115,10 @@ td.dim,.dim{color:var(--muted)}
   .tag.active{background:#12321f;color:#6ee7b7}
   .tag.paused{background:#252a32;color:#9ca3af}
   .tag.archived{background:#20242b;color:#6b7280}
+  .tag.attack{background:#3f1d20;color:#fca5a5}
+  .tag.defend{background:#17293f;color:#93c5fd}
+  .tag.learn{background:#2a2342;color:#c4b5fd}
+  .tag.no_action{background:#252a32;color:#9ca3af}
 }
 
 .lvl{font-size:11px;font-weight:800;padding:1px 6px;border-radius:4px;color:#fff}

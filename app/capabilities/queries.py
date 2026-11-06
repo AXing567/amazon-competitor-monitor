@@ -39,7 +39,7 @@ from app.capabilities.types import (
 from app.db import get_session
 from app.domain import baseline as baseline_mod
 from app.domain.thresholds import GROUPS, GROUP_TITLES, spec_groups
-from app.models import Action, Competitor, MyProduct, Signal, Snapshot, User
+from app.models import Action, Competitor, Decision, MyProduct, Signal, Snapshot, User
 from app.services import (
     action_log,
     binding,
@@ -520,10 +520,14 @@ def get_change_history(
     days: int = 30,
     limit: int = 200,
 ) -> dict:
-    """单一竞品的三条时间线：快照 / 信号 / 动作。
+    """单一竞品的四条时间线：快照 / 信号 / 判断 / 动作。
 
     「他昨天是不是改过价」这类问题必须能一眼看到**原始快照**，
     只看信号是不够的——信号是 L2 判出来的，判据错了就没有痕迹可查。
+
+    **第四条「判断」不是「动作」的子集。** 大多数判断压根没变成动作
+    （看完了决定不动，也是一种决定），如果只能从动作点进去看当时的判断，
+    那「为什么这次没动」就永远查不到——而这恰恰是最该复盘的一类。
     """
     asin = (asin or "").strip().upper()
     if not asin:
@@ -573,6 +577,21 @@ def get_change_history(
                 u = s.get(User, a.user_id)
                 users[a.user_id] = u.name if u else None
 
+        # 判断。同一个 session 里查而不是调 decision_log.list_for_competitor：
+        # 查两次会拿到两个时刻的库，而且这里的字段裁剪和另外三条线保持一致。
+        decs = list(
+            s.execute(
+                select(Decision)
+                .where(
+                    Decision.tenant_id == ctx.tenant_id,
+                    Decision.competitor_id == comp.id,
+                    Decision.created_at >= since,
+                )
+                .order_by(desc(Decision.created_at), desc(Decision.id))
+                .limit(page)
+            ).scalars()
+        )
+
         return {
             "ok": True,
             "asin": comp.asin,
@@ -610,6 +629,29 @@ def get_change_history(
                     "pushed_at": x.pushed_at.isoformat() if x.pushed_at else None,
                 }
                 for x in sigs
+            ],
+            # 判断。`decision` 给代码值、`decision_label` 给中文，两个都给：
+            # 面板上色按代码值匹配，显示按中文，前端自己拼字符串早晚会拼出
+            # 「no_action」这种东西给业务看。
+            "decisions": [
+                {
+                    "id": x.id,
+                    "at": x.created_at.isoformat() if x.created_at else None,
+                    "decision": x.decision,
+                    "decision_label": decision_log.DECISION_LABELS.get(
+                        x.decision, x.decision
+                    ),
+                    "headline": x.headline,
+                    "reasons": list(x.reasons or []),
+                    "suggested_actions": list(x.suggested_actions or []),
+                    "confidence": x.confidence,
+                    "verify_days": x.verify_days,
+                    "origin": x.origin,
+                    "origin_label": decision_log.ORIGIN_LABELS.get(x.origin, ""),
+                    "signal_id": x.signal_id,
+                    "signal_type": x.signal_type,
+                }
+                for x in decs
             ],
             "actions": [
                 {

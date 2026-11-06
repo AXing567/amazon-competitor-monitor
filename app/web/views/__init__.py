@@ -1,4 +1,4 @@
-"""五个视图的登记处。
+"""六个视图的登记处。
 
 ## 为什么每个视图一个文件，却只用一次拼装
 
@@ -68,7 +68,7 @@ def html_sections() -> str:
 
 
 def js_bundle() -> str:
-    """五个视图的 JS 拼起来（在 `layout.JS_CORE` 之后执行，所以能直接用 `register`）。"""
+    """六个视图的 JS 拼起来（在 `layout.JS_CORE` 之后执行，所以能直接用 `register`）。"""
     return "\n".join(v.module.js() for v in VIEWS)
 
 

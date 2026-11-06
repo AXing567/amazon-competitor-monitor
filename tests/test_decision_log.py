@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.capabilities.queries import get_change_history
+from app.capabilities.types import CapContext
 from app.db import get_session
 from app.models import Action, Competitor, Decision, MyProduct, Signal
 from app.services import briefer, decision_log
@@ -314,3 +316,61 @@ def test_latest_for_signal_returns_newest(scene):
     assert latest is not None
     rows = _decisions()
     assert latest["id"] == max(r.id for r in rows)
+
+
+# ============================================================
+# 出口：判断必须能被查回来
+# ============================================================
+
+
+def test_change_history_has_a_decision_line(scene):
+    """看板「变更历史」要有第四条时间线：判断。
+
+    只有「快照 / 信号 / 动作」三条线时，判断只能从动作记录点进去看
+    （「当时的判断」按钮）。而**大多数判断压根没变成动作**——看完决定不动
+    也是一种决定——这批恰恰最该复盘：事后发现判断错了，也没有任何入口能翻回来。
+    """
+    briefer.build_daily_brief("default", hours=24)
+
+    res = get_change_history(CapContext(tenant_id="default"), "B0CMP00001", days=30)
+    assert res["ok"] is True
+    decs = res["decisions"]
+    assert len(decs) == 1, "落库了但变更历史里看不到，等于只写不读"
+
+    d = decs[0]
+    assert d["decision"] in ("attack", "defend", "learn", "no_action")
+    # 代码值给面板上色用，中文给业务看。只给代码值，页面上就会出现 no_action
+    assert d["decision_label"] and d["decision_label"] != d["decision"]
+    assert d["headline"]
+    assert d["reasons"], "这一栏光有结论没理由，等于让人自己回忆"
+    assert d["origin_label"] == "日报"
+    assert d["signal_id"] == scene["signal_id"], "判断要能追回是哪条信号引出的"
+
+
+# ============================================================
+# 出口：判断必须能被查回来
+# ============================================================
+
+
+def test_change_history_has_a_decision_line(scene):
+    """看板「变更历史」要有第四条时间线：判断。
+
+    只有「快照 / 信号 / 动作」三条线时，判断只能从动作记录点进去看
+    （「当时的判断」按钮）。而**大多数判断压根没变成动作**——看完决定不动
+    也是一种决定——这批恰恰最该复盘：事后发现判断错了，也没有任何入口能翻回来。
+    """
+    briefer.build_daily_brief("default", hours=24)
+
+    res = get_change_history(CapContext(tenant_id="default"), "B0CMP00001", days=30)
+    assert res["ok"] is True
+    decs = res["decisions"]
+    assert len(decs) == 1, "落库了但变更历史里看不到，等于只写不读"
+
+    d = decs[0]
+    assert d["decision"] in ("attack", "defend", "learn", "no_action")
+    # 代码值给面板上色用，中文给业务看。只给代码值，页面上就会出现 no_action
+    assert d["decision_label"] and d["decision_label"] != d["decision"]
+    assert d["headline"]
+    assert d["reasons"], "这一栏光有结论没理由，等于让人自己回忆"
+    assert d["origin_label"] == "日报"
+    assert d["signal_id"] == scene["signal_id"], "判断要能追回是哪条信号引出的"

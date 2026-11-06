@@ -33,7 +33,7 @@ from app.web.views import html_sections, js_bundle, tabs
 
 @lru_cache(maxsize=1)
 def render_panel() -> str:
-    """把外壳 + 五个视图拼成一个完整页面。"""
+    """把外壳 + 六个视图拼成一个完整页面。"""
     return "".join(
         (
             layout.head("竞品监控 · 管理面板"),

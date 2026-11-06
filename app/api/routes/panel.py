@@ -1,6 +1,6 @@
 """REST · 面板数据端点（`/api/panel/*`）。
 
-五个视图各有自己的聚合端点。它们与 `/api/cap/*` 的分工是：
+六个视图各有自己的聚合端点。它们与 `/api/cap/*` 的分工是：
 
 | | `/api/cap/*` | `/api/panel/*` |
 |---|---|---|
@@ -321,9 +321,11 @@ async def api_panel_changes(
     limit: int = Query(default=200, ge=1, le=1000),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> Any:
-    """三条时间线：原始快照 / 信号 / 动作。
+    """四条时间线：原始快照 / 信号 / 判断 / 动作。
 
     快照必须给——信号是 L2 判出来的，判据错了只有原始快照能查。
+    判断单独一条线：大多数判断没变成动作，从动作点进去只能看到「做过的」，
+    看不到「看过但决定不动的」，而后者恰恰最该复盘。
     """
     ctx = _ctx(x_user_id)
     return _json(
