@@ -44,6 +44,7 @@ from app.services import (
     action_log,
     binding,
     briefer,
+    decision_log,
     health,
     identity,
     pool,
@@ -667,6 +668,63 @@ def list_actions(
 
 
 # ============================================================
+# ⑨b get_due_reviews（复盘队列）
+# ============================================================
+
+
+def get_due_reviews(
+    ctx: CapContext,
+    limit: int = 50,
+    include_future_days: int = 0,
+) -> dict:
+    """到期未复盘的动作，带前后指标对比。
+
+    「到期」的定义是 `verify_due_at <= now and verdict is null`。
+    没有 `verify_due_at` 的动作永远不会出现在这里——它当初就没承诺要回看，
+    把它塞进队列只会让队列变长、然后被忽略。
+
+    `changes` 里每个元素是 `{label, kind, before, after, delta, delta_pct}`，
+    **没有**「好/坏」字段，也没有格式化后的字符串：格式化归展示层，
+    判定归人。理由见 `action_log.diff_metrics` 的文档。
+    """
+    items = action_log.due_reviews(
+        ctx.tenant_id,
+        limit=limit,
+        include_future_days=include_future_days,
+    )
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+        # 面板横幅上要显示的那个数。超期和当日到期分开给，
+        # 因为「今天到期」和「已经躺了两周」该有不同紧迫感。
+        "overdue": sum(1 for it in items if (it.get("overdue_days") or 0) > 0),
+    }
+
+
+# ============================================================
+# ⑨c get_decision（当时的判断原文）
+# ============================================================
+
+
+def get_decision(ctx: CapContext, decision_id: int) -> dict:
+    """一条判断的原文：结论、理由、当时算出的中间量、确定性。
+
+    这是「三天后为什么建议我跟这个价」的唯一出口。它**不接受按信号查**——
+    按信号查会让人以为「一条信号只有一个判断」，而实际可能因为锚点补全
+    被重判过几次；每一次都是一条独立的历史，要按 ID 精确取。
+    """
+    row = decision_log.get(decision_id, tenant_id=ctx.tenant_id)
+    if row is None:
+        return {
+            "ok": False,
+            "error": f"判断 #{decision_id} 不存在",
+            "hint": "从动作记录的「当时的判断」点进来，或先看 get_due_reviews",
+        }
+    return {"ok": True, **row}
+
+
+# ============================================================
 # ⑨ get_threshold_schema
 # ============================================================
 
@@ -928,6 +986,31 @@ CAPABILITIES: tuple[Capability, ...] = (
             _p("limit", "最多几条", T_INT, default=200, minimum=1, maximum=1000),
         ),
         handler=list_actions,
+    ),
+    Capability(
+        name="get_due_reviews",
+        scope=SCOPE_SHARED,
+        group=GROUP_QUERY,
+        title="到期该复盘的动作",
+        description="已到验证日期但还没填结论的动作，带动作前后的指标对比。",
+        params=(
+            _p("limit", "最多几条", T_INT, default=50, minimum=1, maximum=500),
+            _p("include_future_days", "提前几天预告", T_INT, default=0, minimum=0,
+               maximum=30, help="0 = 只看已到期；1 = 顺带把明天到期的也列出来"),
+        ),
+        handler=get_due_reviews,
+    ),
+    Capability(
+        name="get_decision",
+        scope=SCOPE_SHARED,
+        group=GROUP_QUERY,
+        title="当时的判断原文",
+        description="某次判断的结论、理由、当时算出的中间量与确定性（审计用途）。",
+        params=(
+            _p("decision_id", "判断 ID", T_INT, required=True, minimum=1,
+               help="动作记录里的 decision_id"),
+        ),
+        handler=get_decision,
     ),
     Capability(
         name="get_threshold_schema",

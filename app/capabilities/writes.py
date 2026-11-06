@@ -340,6 +340,42 @@ def record_action(
 
 
 # ============================================================
+# ⑦b review_action（复盘）
+# ============================================================
+
+
+def review_action(
+    ctx: CapContext,
+    action_id: int,
+    verdict: str,
+    note: Optional[str] = None,
+) -> dict:
+    """给一条到期动作填复盘结论。
+
+    ## 为什么这个能力不叫 `judge_xxx`
+
+    项目里的 `judge_*` 一律指「L2 纯函数的自动判断」。复盘**不是自动判断**：
+    系统只负责把动作前后的指标并排放好，有效/无效由人填。
+    名字混用会让后来的人以为系统能自己判有效性，然后去找那个「判据」——
+    而它不存在，也不该存在（同一个降价，跟价时是威胁、断货时是机会）。
+
+    ## 为什么 `verdict` 只有三个值
+
+    有效 / 无效 / 判不了。刻意不加「部分有效」：加了之后人会一律选中间，
+    复盘就退化成「每件事都有点效果」，等于没复盘。
+    「判不了」是**必须存在**的第三个值——数据不够时逼人二选一，
+    他会随手选一个，于是库里多了一条假结论。
+    """
+    return action_log.review_action(
+        ctx.tenant_id,
+        action_id=action_id,
+        verdict=verdict,
+        note=note,
+        user_id=ctx.user_id,
+    )
+
+
+# ============================================================
 # ⑧ handle_action_callback
 # ============================================================
 
@@ -636,6 +672,23 @@ CAPABILITIES: tuple[Capability, ...] = (
                unit="天"),
         ),
         handler=record_action,
+    ),
+    Capability(
+        name="review_action",
+        scope=SCOPE_SHARED,
+        group=GROUP_WRITE,
+        title="复盘一条动作",
+        description="到期动作回填结论：有效 / 无效 / 判不了，并留存当时的对比指标与备注。",
+        params=(
+            _p("action_id", "动作 ID", T_INT, required=True, minimum=1,
+               help="从 get_due_reviews 或 list_actions 里拿"),
+            _p("verdict", "复盘结论", T_ENUM, required=True,
+               enum=list(action_log.VERDICTS),
+               help="有效=达到目的；无效=没达到；判不了=数据不足（这也是结论，别硬填）"),
+            _p("note", "复盘备注", T_STR,
+               help="比结论值钱：「有效，但对手那周断货了」能说明因果"),
+        ),
+        handler=review_action,
     ),
     Capability(
         name="handle_action_callback",

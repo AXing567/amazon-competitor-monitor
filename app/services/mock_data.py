@@ -59,9 +59,11 @@ from app.domain.diff import DiffEngine
 from app.domain.tiering import judge_tier
 from app.models import (
     Action,
+    AlertRule,
     CollectRun,
     Competitor,
     CompetitorBinding,
+    Decision,
     MyProduct,
     SeasonCalendar,
     Signal,
@@ -71,7 +73,7 @@ from app.models import (
     User,
     UserIdentity,
 )
-from app.services import collector, identity, settings_store
+from app.services import briefer, collector, identity, settings_store
 
 # ============================================================
 # 自家锚点
@@ -203,8 +205,13 @@ SCENARIOS: list[dict[str, Any]] = [
         "kw_total": 320,
         "base_price": 26.99,
         "days": 4,
-        # 今天降 2 块（-7.4%）：够 P1，让看板有一条「对手在动」的事
-        "price_changes": {0: 24.99},
+        # 今天降到 22.99（-14.8%）：跌破自家 24.99，是真正的价格战。
+        #
+        # 原本写的是 24.99——那会让 `judge_price_follow` 撞上一个退化场景：
+        # 对手追平我的价，「跟价」等于原地不动，而引擎仍算出「+0%」并建议行动。
+        # 那个 bug 已经修了（见 decision.py 的「第零道」），但 Mock 数据
+        # 更应该展示正常场景，而不是靠退化场景去证明判据存在。
+        "price_changes": {0: 22.99},
         "monthly_units": 3000,
         "rating": 4.7,
         "review_count": 4820,
@@ -419,7 +426,16 @@ def build(quiet: bool = True) -> dict:
         _seed_bindings(comps, my_id, uid)
         _seed_collect_runs(comps)
         _seed_thresholds(my_id, uid)
+        # 决策必须**先于**动作产生：动作记录会按 signal_id 挂上当时的判断，
+        # 顺序反了 `decision_id` 就全是空的，而「当时的判断」按钮正是复盘的一半价值。
+        # 这里直接跑真实的 `build_daily_brief()`，不是另写一份造数逻辑——
+        # Mock 的意义是让真实链路跑一遍，不是摆一堆好看的假数据。
+        briefer.build_daily_brief(settings.tenant_id, hours=24 * 30)
         _seed_actions(uid, my_id)
+        # 动作种子里补了一条「今天晚些时候」的快照（对手二次降价），
+        # 价格变了就必须再校一次分层：自检的对象应该是**面板最终显示的状态**，
+        # 而不是中途某个中间状态。
+        comps = _rescore(comps, my_id, quiet=True)
         stats = stats_in_current_mode()
 
     if not quiet:
@@ -430,8 +446,19 @@ def build(quiet: bool = True) -> dict:
 def clear(quiet: bool = True) -> dict:
     """清空 Mock 库的全部业务数据。**只删行，不删表。**
 
-    删表的顺序按外键依赖反着来：`snapshots` / `signals` 引用 `competitors`，
-    先删它们，否则 SQLite 的 `PRAGMA foreign_keys=ON` 会直接拒绝。
+    删除顺序按外键依赖反着来：`snapshots` / `signals` 引用 `competitors`，
+    `decisions` 引用 `signals`，`actions` 引用 `decisions`——
+    先删下游，否则 SQLite 的 `PRAGMA foreign_keys=ON` 会直接拒绝。
+
+    ## 为什么新增一张表时必须回来改这个列表
+
+    这张清单漏表不会有任何编译期或启动期提示，症状是「清空 Mock」按钮
+    在某种数据组合下报 `FOREIGN KEY constraint failed`——
+    而它取决于「那个库之前有没有产生过决策记录」，换句话说：
+    新库上点一百次都不会复现，等你 demo 到一半才炸。
+
+    本轮就踩了一次：加完 `decisions` 忘了加进来。
+    所以这里刻意把顺序写成一条**可读的依赖链**，而不是随便一个集合。
     """
     _assert_isolated()
     ensure_mode_ready(DATA_MODE_MOCK)
@@ -439,11 +466,12 @@ def clear(quiet: bool = True) -> dict:
     with using_data_mode(DATA_MODE_MOCK):
         with get_session() as s:
             for model in (
-                Signal,
-                Snapshot,
-                CompetitorBinding,
+                Action,             # → decisions / signals / competitors / my_products / users
+                Decision,           # → signals / competitors
+                Signal,             # → competitors
+                Snapshot,           # → competitors
+                CompetitorBinding,  # → competitors / my_products / users
                 CollectRun,
-                Action,
                 Competitor,
                 ThresholdVersion,
                 ThresholdConfig,
@@ -451,6 +479,7 @@ def clear(quiet: bool = True) -> dict:
                 User,
                 MyProduct,
                 SeasonCalendar,
+                AlertRule,
             ):
                 s.execute(delete(model))
     return {"ok": True, "cleared": True}
@@ -897,50 +926,188 @@ def _seed_thresholds(my_id: int, uid: int) -> None:
             raise MockDataError(f"阈值覆盖写入失败（{label}）：{res.get('error')}")
 
 
+#: 「待复盘」那条动作挂的竞品。挑 S 级：它最可能被人点开看，
+#: 而复盘卡上前后对比最完整的那一条，应该出现在最显眼的位置。
+PENDING_ACTION_ASIN = "B0MOCK1001"
+
+#: 补那条快照时改哪些字段。
+#:
+#: ## 为什么改排名和评价数，**不改价格**
+#:
+#: 价格改了会留下一个看不见的矛盾：看板显示「净价 $21.99」，
+#: 而最近一条信号写着「26.99 → 22.99」。因为信号是 DiffEngine 在**采集时**
+#: 判出来的，这条补的快照没有走采集，也就没有对应信号。
+#: 于是同一个竞品上的两个数各说各话，看的人只会怀疑数据是编的。
+#:
+#: 排名/评价数不在信号判据里（`DiffEngine` 只对价格、库存、内容出信号），
+#: 所以改它们不会制造这种矛盾，同时又足够构成一次真实的「前后差」。
+LATER_CHANGES = {"rank_main": 398, "review_count": 4836}
+
+
 def _seed_actions(uid: int, my_id: int) -> None:
-    """三条动作记录：让「动作记录」页不是空的。
+    """四条动作，覆盖复盘这一屏的全部状态。
 
-    动作是**人做过的事**，不是系统结论。所以这里写的都是"我做了什么"，
-    而不是"系统建议我做什么"——后者属于 Decision，不在这张表里。
+    ## 为什么必须是「四种状态」而不是随便几条
 
-    `executed_at` 只能事后补：`record()` 没有这个参数（它记的是"此刻做的事"）。
-    直接改行的原因不是图省事——Mock 数据要演示"一周前做了什么"，而
-    `record()` 的时间戳永远是现在；不改的话三条动作会挤在同一分钟里，
-    时间线看起来像批量导入。改动范围只有本模块自己造的那三行。
+    复盘屏在不同状态下长得完全不一样：
+
+    - 只有「未到期」→ 你会以为复盘队列是坏的（明明有动作却没有待办）；
+    - 只有「待复习」→ 你不知道填完之后长什么样，于是不敢点；
+    - 只有「已复盘」→ 你不知道「到期了但没填」长什么样，也就不会去填。
+
+    四种都在，这一屏才谈得上"看懂了"。
+
+    ## 为什么最后要补一条「更晚的」快照
+
+    `baseline_metrics` 是**记动作那一刻**抓的。如果之后没有新的采集，
+    「动作前 → 现在」两边一模一样，复盘卡上只会显示「指标没有任何变化」——
+    那是真的结论（动作没起作用），但用来演示等于什么都没演示。
+
+    所以这里补一条今天晚些时候的快照（对手二次降价 24.99 → 23.49），
+    让待复盘那张卡上有真实的「前后差」。
+    补完之后 `build()` 会**再跑一次 `_rescore`**：分层必须在新价格下依然成立，
+    否则这条 Mock 数据就是自相矛盾的。
+
+    ## 为什么 `executed_at` / `verify_due_at` 是事后改的
+
+    `record()` 永远记「此刻做的事」。不改的话四条动作会挤在同一分钟里，
+    时间线看起来像批量导入，而且 `verify_due_at` 全在未来 → 待复盘永远是空的。
+    改动范围只有本模块自己造的那几行，且改的是时间戳，不动业务字段。
     """
     from app.services import action_log as log_svc
 
+    now = datetime.now()
     with get_session() as s:
         comp = s.execute(
-            select(Competitor).where(Competitor.asin == "B0MOCK1001").limit(1)
+            select(Competitor).where(Competitor.asin == PENDING_ACTION_ASIN).limit(1)
         ).scalar_one_or_none()
         cid = comp.id if comp else None
+        sig_id = None
+        if cid is not None:
+            sig = s.execute(
+                select(Signal)
+                .where(Signal.competitor_id == cid, Signal.level == "P0")
+                .order_by(desc(Signal.detected_at))
+                .limit(1)
+            ).scalar_one_or_none()
+            sig_id = sig.id if sig else None
 
-    entries = [
-        ("跟价", "对手降到 24.99，我们跟到 24.49 保住 buybox", 2),
-        ("改主图", "把「可折叠」拍到第一张主图上", 5),
-        ("补货", "按 32 天补货周期下了 3000 件", 9),
+    # (动作类型, 说明, 几天前做的, 几天后回看, 复盘结论)
+    #
+    # 说明必须和「当时的判断」讲同一件事。之前这里是「对手断货 → 打他详情页」，
+    # 却挂在一条**降价**信号上，点开判断看到的是「可以跟进降价」——
+    # 动作和依据自相矛盾。这种不一致在演示时最伤：看的人会先怀疑数据是编的，
+    # 然后连带不相信别的页。
+    plan: list[tuple[str, str, int, Optional[int], Optional[str]]] = [
+        ("listing_optimize", "把「可折叠」拍到第一张主图上", 5, None, None),
+        ("coupon_test", "挂 5% Coupon 试让利，不改标价", 12, 7, "effective"),
+        ("price_follow", "对手降到 22.99，我们跟到 22.49 保住 buybox", 8, 7, None),
+        ("stock_alert", "按 32 天补货周期下了 3000 件", 2, None, None),
     ]
-    created: list[int] = []
-    for action_type, desc, _days in entries:
+
+    made: list[tuple[int, int, Optional[int], Optional[str]]] = []
+    # 循环变量刻意不叫 `desc`：那会遮蔽 `sqlalchemy.desc()`，函数开头那条
+    # `order_by(desc(Signal.detected_at))` 就会变成 UnboundLocalError。
+    # 报错只说「局部变量 desc 未赋值」，和真正的原因隔了三层，很容易查错方向。
+    for action_type, text, days_ago, verify_days, verdict in plan:
         res = log_svc.record(
             tenant_id=settings.tenant_id,
             action_type=action_type,
-            description=desc,
+            description=text,
+            # 只有和竞品有关的两条挂信号：补货、改 listing 是自家动作，
+            # 硬挂一条竞品信号会让「当时的判断」点开是一个不相干的结论。
+            signal_id=sig_id if action_type in ("price_follow", "coupon_test") else None,
+            verify_days=verify_days,
             user_id=uid,
             my_product_id=my_id,
-            competitor_id=cid,
+            competitor_id=cid if action_type in ("price_follow", "coupon_test") else None,
             source="panel",
         )
         if not res.get("ok"):
             raise MockDataError(f"动作记录写入失败：{res.get('error')}")
-        created.append(int(res["action_id"]))
+        made.append((int(res["action_id"]), days_ago, verify_days, verdict))
 
-    with get_session() as s:
-        for action_id, (_t, _d, days_ago) in zip(created, entries):
+    # ---- 时间线：把 executed_at / verify_due_at / reviewed_at 挪到该在的位置 ----
+    for action_id, days_ago, verify_days, _v in made:
+        with get_session() as s:
             row = s.get(Action, action_id)
-            if row is not None:
-                row.executed_at = datetime.now() - timedelta(days=days_ago)
+            if row is None:                       # pragma: no cover —— 防御性
+                continue
+            row.executed_at = now - timedelta(days=days_ago)
+            if verify_days:
+                row.verify_due_at = row.executed_at + timedelta(days=int(verify_days))
+
+    # ---- 已复盘的那条：结论 + 备注 + 复盘时间 ----
+    for action_id, days_ago, _vd, verdict in made:
+        if not verdict:
+            continue
+        res = log_svc.review_action(
+            settings.tenant_id,
+            action_id=action_id,
+            verdict=verdict,
+            note="跟价后 buybox 夺回，转化率没掉，算达到目的",
+            user_id=uid,
+        )
+        if not res.get("ok"):
+            raise MockDataError(f"复盘写入失败：{res.get('error')}")
+        # 复盘时间挪到动作后第 4 天：留在"现在"会让「这条躺了多久才被回看」
+        # 恒等于动作至今的天数，那个指标就失去意义了。
+        with get_session() as s:
+            row = s.get(Action, action_id)
+            if row is not None and row.executed_at:
+                row.reviewed_at = row.executed_at + timedelta(days=4)
+
+    # ---- 补一条更晚的快照：让「待复盘」那张卡上有真实的前后差 ----
+    _append_later_snapshot(PENDING_ACTION_ASIN)
+
+
+def _append_later_snapshot(asin: str) -> None:
+    """给某个竞品补一条「今天晚些时候」的快照，模拟之后又采了一次。
+
+    只改 `LATER_CHANGES` 里列出的字段，其余沿用最后一条——这样这条快照
+    除了那两处之外和真实采集的结果没有区别。
+    """
+    with get_session() as s:
+        comp = s.execute(
+            select(Competitor).where(Competitor.asin == asin).limit(1)
+        ).scalar_one_or_none()
+        if comp is None:
+            return
+        last = s.execute(
+            select(Snapshot)
+            .where(Snapshot.competitor_id == comp.id)
+            .order_by(desc(Snapshot.captured_at))
+            .limit(1)
+        ).scalar_one_or_none()
+        if last is None:
+            return
+        later = {
+            "rank_main": last.rank_main,
+            "rank_sub": last.rank_sub,
+            "rank_label": last.rank_label,
+            "rating": last.rating,
+            "review_count": last.review_count,
+            **LATER_CHANGES,
+        }
+        s.add(
+            Snapshot(
+                competitor_id=comp.id,
+                # 比最后一条晚 2 小时：同一天内的第二次采集，符合真实节奏
+                captured_at=(last.captured_at or datetime.now()) + timedelta(hours=2),
+                price=last.price,
+                coupon_value=last.coupon_value,
+                net_price=last.net_price,
+                monthly_units=last.monthly_units,
+                in_stock=True,
+                stock_hint="IN_STOCK",
+                title=last.title,
+                release_date=last.release_date,
+                keywords=last.keywords,
+                traffic_keywords_total=last.traffic_keywords_total,
+                data_quality="full",
+                **later,
+            )
+        )
 
 
 # ============================================================

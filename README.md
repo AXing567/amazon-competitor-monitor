@@ -470,14 +470,39 @@ python run.py --no-scheduler
   「采集时判」和「从库里重算」用两套判据（重算路径上总量恒为 `None`，
   抽样守卫退化成只看"条数 < 50"），同一批数据两条路可能给出不同档位，且不报错。
 
-**业务闭环缺的两块（不是 bug，是没做）**
+**业务闭环（2026-11-06 已接通，剩下三处缺口）**
 
-- **`decisions` 表零写入**。`app/domain/decision.py` 里有完整的判定逻辑（跟价/进攻/学习/
-  不动作），`briefer._apply()` 也确实把结果放进了日报的内存对象——但**没有一行落库**。
-  后果：日报发出去就散了，回看不了"当时为什么建议跟价"。
-- **动作与复盘没有闭环**：`actions` 表在写（面板手记 + 飞书卡片回调），
-  但 `verify_due_at` 到期后的复盘没有实现——记了"7 天后回看他的 BSR"，
-  7 天后没有任何东西来提醒你回看。系统现在**能看、能想，不能闭环**。
+闭环现在长这样，每一段都落库：
+
+```
+信号 → 判断（decisions 落库，带理由/中间量/确定性）
+     → 动作（actions 关联 decision_id + 抓 baseline_metrics）
+     → 到期（get_due_reviews 摆出前后指标差）
+     → 人判（verdict: 有效/无效/判不了 + 备注 + 复盘时间）
+```
+
+- **`decisions` 之前零写入，现在两条出口都写。** 日报（`build_daily_brief`）和实时预警
+  （`build_alerts_since`）共用 `_attach_action` 产出判断，`_persist_decisions` 统一落库。
+  幂等键是内容指纹（`dedupe_key` 上有唯一索引）：重跑日报不重复写，
+  但锚点变了导致判断依据变了，会留新行——那是**两次不同的判断**，不是重复。
+  首次落库后 `BriefItem.decision_id` 会回填，动作才能挂上「当时的判断」。
+- **`actions.baseline_metrics` 之前恒为 `None`，现在记动作那一刻就抓。** 这一列建表时就有，
+  但一直没写入方——于是「7 天后回看」四个字是空的：没有基线，`result_metrics` 拿回来也
+  无从比较，只能靠人回忆「当时他多少钱、我当时多少单」。
+- **复盘提醒挂在日报里，不单开渠道。** 单开一个「复盘提醒」通道，一周后它就会变成被静音的
+  那一个；日报每天都在看，末尾多三行反而形成习惯。
+
+剩余缺口：
+
+- **`unchanged` 与 `no_data` 分了三种状态，但「自家那半边」永远是静态的。**
+  锚点是手填的，不随时间变，所以复盘里「我的日均销量没变」大概率是**没人更新**，
+  不是没变化。`comparison.mine_stale` 会标出来，面板上也明说了——但要真正解决，
+  得有 SP-API 或手工定期更新，现在只能靠这句话提醒人别误读。
+- **`verdict` 不做版本历史。** 改判会覆盖上一次结论（`reviewed_at` 更新时间）。
+  审计对象是「当时的判断」（在 `decisions` 里），复盘结论是给人看的结果，不追求留痕。
+  如果以后要统计「判错过多少次」，需要另加一张 `action_reviews` 表。
+- **复盘效果还没有聚合视图。** 单条能看前后差，但「跟价这个动作，过去 3 个月
+  平均把 BSR 拉动了多少」现在还答不上来——`verdict` 攒够样本才能做，属于下一轮。
 
 
 ---
@@ -613,7 +638,7 @@ http 地址），断网、内网、拷到 U 盘都能打开。六个标签：
 | 数据看板 | 我在盯谁、他现在什么价、最近动了什么、属于哪个战场 | `GET /api/panel/board`、`GET /api/panel/competitors/{asin}/changes` | — |
 | 阈值配置 | 现在的阈值是多少、**每个数字什么意思**、谁改的、改完会多报几条 | `GET /api/config/thresholds`、`/versions`、`/explain`、`/schema` | `POST /api/config/thresholds`、`/simulate`、`/rollback` |
 | 竞品池 | 谁在盯、谁暂停了、谁归档了，加/停/归档 | `GET /api/panel/pool` | `POST /api/panel/pool/{asin}/status` |
-| 动作记录 | 我做过什么、到期该复盘哪条 | `GET /api/panel/actions` | `POST /api/panel/actions` |
+| 动作记录 | 我做过什么、到期该复盘哪条、**当时为什么这么判** | `GET /api/panel/actions`、`GET /api/panel/reviews`、`GET /api/cap/get_decision` | `POST /api/panel/actions`、`POST /api/panel/reviews` |
 | 数据健康 | 采集是不是在跑、哪一环在失败 | `GET /api/panel/health` | — |
 
 （面板还有 `GET /api/panel/context` 提供当前租户/自家产品/操作人，各视图都靠它。）

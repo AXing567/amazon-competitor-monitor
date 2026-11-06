@@ -306,17 +306,76 @@ class Signal(Base):
 
 
 class Decision(Base):
+    """一条信号在某个时刻被判断成什么样。
+
+    ## 这张表是审计表，不是缓存表
+
+    它的用途只有一个：三天后有人问「当时为什么建议我跟这个价」，
+    要能原样答出来。所以**存的是判断当时的快照**，不是「当前最优判断」——
+    后来锚点补全了、阈值改了，重算出来的结论会更准，
+    但那不是「当时为什么」，而是「现在怎么看」。两者要能并存。
+
+    ## 为什么必须有 headline / metrics / confidence
+
+    第一版只有 `decision`（attack/no_action）+ `reasons` + `suggested_actions`。
+    那样落库之后仍然答不上「当时为什么」，因为：
+
+    - 缺 `headline`：「建议不跟价」和「建议不跟价，库存撑不住」是两条不同的结论，
+      只存前者就丢了后半句，而那半句恰恰是理由的入口；
+    - 缺 `metrics`：跟价判断的核心证据是算出来的盈亏平衡单量
+      （「日销要涨到 128 单才不亏」）。结论可以重算，但当时用的
+      售价/成本/日均销量不能重算——那三个数会变。所以要把算出来的数一起存；
+    - 缺 `confidence`：「大概率」「建议」这种措辞背后是确定性数值，
+      丢掉之后回看会发现所有结论语气一样，没法分辨哪条该信。
+
+    ## 为什么要 `dedupe_key` 上的唯一索引
+
+    日报会被重跑（手动触发、失败重试、面板刷新）。没有幂等键的话，
+    同一条信号每跑一次就多一行，一周后 `decisions` 里全是重复，
+    而「当时为什么」要在一堆一样的行里挑。
+
+    幂等键取 `sha256(tenant|signal|decision|headline|actions|metrics)`：
+
+    - 内容完全一样 → 同一把钥匙 → 唯一索引挡住，不重复写；
+    - 内容变了（锚点补全后建议从「不跟」变成「可以跟」）→ 换一把钥匙 → 新行。
+      这是**应该留下的历史**，不是重复。
+
+    ## `origin` 为什么不合并进 `source`
+
+    `source` 在动作表里表示「人从哪个入口操作」。这里的 `origin` 表示
+    「这条判断是哪个出口产生的」——日报（brief）还是实时预警（alert）。
+    两者的判据完全一样（共用 `_attach_action`），但**送达时机不同**：
+    查「为什么我没收到这条提醒」时要能分开。
+    """
+
     __tablename__ = "decisions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
     signal_id: Mapped[Optional[int]] = mapped_column(ForeignKey("signals.id"), nullable=True)
     competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id"), index=True)
 
     # attack / defend / learn / no_action
     decision: Mapped[str] = mapped_column(String(16))
+    #: 一句话结论。**不是** `reasons[0]` 的复制——它包含「为什么」的那半句。
+    headline: Mapped[str] = mapped_column(Text, default="")
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     suggested_actions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    #: 判断时算出来的中间量（盈亏平衡单量、清仓得分…）。结论可重算，这些数不能。
+    metrics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     verify_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: 建议回看的日期（`created_at + verify_days`）。与 `Action.verify_due_at`
+    #: 的区别：这里是「系统建议什么时候回看」，那里是「人承诺什么时候回看」。
+    verify_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    #: 冗余的信号类型。不冗余就得 join signals，而信号表是流水，
+    #: 回看时那条信号可能已经不在默认查询窗口里了。审计表要能独立读。
+    signal_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: brief（日报） / alert（实时预警）
+    origin: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: 幂等键，见类文档。唯一索引建在 migrations.IDEMPOTENT_INDEXES 里。
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
@@ -352,11 +411,26 @@ class Action(Base):
     description: Mapped[str] = mapped_column(Text, default="")
 
     executed_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    #: 动作**执行那一刻**的指标快照。给复盘当基准用。
+    #:
+    #: 这一列建了很久但一直写 `None`，于是「7 天后回看」四个字是空的：
+    #: 没有基线，`result_metrics` 拿回来也无从比较，只能靠人回忆
+    #: 「当时他多少钱、我当时多少单」。而那恰恰是人记不准的部分。
+    #: 现在由 `action_log.record()` 在写入时抓一份（见 `_capture_metrics`）。
     baseline_metrics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     verify_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    #: 复盘时抓的同一组指标，与 `baseline_metrics` 同结构，可直接相减。
     result_metrics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # effective / ineffective / inconclusive
     verdict: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+
+    # ---- 复盘留痕 ----
+    #: 判定时间。它和 `executed_at` 的差值是「这条动作躺了多久才被回看」，
+    #: 是这套系统自己好不好用的度量：一直不判，说明提醒没送到位。
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    #: 人写的复盘备注。比 `verdict` 值钱——「有效」只说明结果，
+    #: 「有效，因为对手那周断货了，不能归功于跟价」才说明因果。
+    review_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 # ============================================================

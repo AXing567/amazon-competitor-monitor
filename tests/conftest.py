@@ -93,3 +93,65 @@ def _isolated_db_per_module(request, tmp_path_factory):
             _db.engine.dispose()
         except Exception:      # pragma: no cover —— 清理失败不该掩盖用例本身的失败
             pass
+
+
+@pytest.fixture()
+def clean_db():
+    """清空全部业务表，让每个用例从同一个起点开始。
+
+    ## 为什么需要它（conftest 的库是**模块级**共用的）
+
+    上面那个夹具按模块给库，模块内所有用例共用一个文件。于是第二个用例
+    会看到第一个用例留下的 `MyProduct` / `Competitor` / `Signal`。
+
+    这带来的失败特别难读：
+
+    - `build_daily_brief` 用 `select(MyProduct).limit(1)`，拿到哪一条取决于
+      插入顺序——用例之间开始互相影响，而没有任何一处显式共享；
+    - 「重跑不重复」这类断言会数到别人的行，失败信息指向完全错误的方向。
+
+    ## 顺序就是外键依赖链，**新增表时要回来改**
+
+    漏表的症状是 `FOREIGN KEY constraint failed`，而且只在「那个用例刚好
+    造过那种数据」时出现——空库跑一次不复现。写在这里比每个测试文件各抄一份好：
+    抄两份就会有两份不同的顺序，然后其中一份是错的。
+    """
+    from sqlalchemy import delete
+
+    from app.db import get_session
+    from app.models import (
+        Action,
+        AlertRule,
+        CollectRun,
+        Competitor,
+        CompetitorBinding,
+        Decision,
+        MyProduct,
+        SeasonCalendar,
+        Signal,
+        Snapshot,
+        ThresholdConfig,
+        ThresholdVersion,
+        User,
+        UserIdentity,
+    )
+
+    with get_session() as s:
+        for model in (
+            Action,             # → decisions / signals / competitors / my_products / users
+            Decision,           # → signals / competitors
+            Signal,             # → competitors
+            Snapshot,           # → competitors
+            CompetitorBinding,  # → competitors / my_products / users
+            CollectRun,         # → competitors
+            Competitor,
+            ThresholdVersion,
+            ThresholdConfig,
+            UserIdentity,
+            User,
+            MyProduct,
+            SeasonCalendar,
+            AlertRule,
+        ):
+            s.execute(delete(model))
+    return None

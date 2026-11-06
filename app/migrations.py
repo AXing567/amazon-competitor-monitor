@@ -102,6 +102,24 @@ ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # （本文件的规矩只有 ADD COLUMN，见模块文档）。
     ("my_products", "source", "VARCHAR(24)"),     # manual / sellersprite_proxy / sp_api
     ("my_products", "assumed_fields", "JSON"),    # 哪些字段是假设值（字段名列表）
+
+    # decisions：这张表建了快两轮，一行没写过。真要用起来，缺的不是写入动作，
+    # 是「回看时看得懂」的那几列——没有 headline 就只剩 attack/no_action，
+    # 没有 metrics 就算不出「当时日销要涨到 128 单才不亏」。
+    # 每条列为什么必须存在，见 models.Decision 的类文档。
+    ("decisions", "tenant_id", "VARCHAR(64)"),
+    ("decisions", "headline", "TEXT"),
+    ("decisions", "metrics", "JSON"),
+    ("decisions", "confidence", "FLOAT"),
+    ("decisions", "verify_due_at", "DATETIME"),
+    ("decisions", "signal_type", "VARCHAR(32)"),
+    ("decisions", "origin", "VARCHAR(16)"),
+    ("decisions", "dedupe_key", "VARCHAR(64)"),
+
+    # actions：复盘留痕。`verdict` 早就有了，但「什么时候判的、凭什么判的」
+    # 没有地方放——于是复盘结论只能是一句「有效」，而下一个人看不出为什么。
+    ("actions", "reviewed_at", "DATETIME"),
+    ("actions", "review_note", "TEXT"),
 ]
 
 #: 索引：(索引名, 表名, 依赖列, DDL)。
@@ -115,6 +133,40 @@ IDEMPOTENT_INDEXES: list[tuple[str, str, tuple[str, ...], str]] = [
         "actions",
         ("user_id", "executed_at"),
         "CREATE INDEX IF NOT EXISTS ix_action_user_time ON actions(user_id, executed_at)",
+    ),
+    # `dedupe_key` 上必须是 **UNIQUE**，不能只做普通索引。
+    #
+    # 只靠「先 select 再 insert」去重，在「面板刷新日报」和「定时日报」撞在一起时
+    # 会双双通过 select，然后各插一行——症状是 decisions 里出现两行一模一样、
+    # 时间戳差 200ms 的记录，而且不报任何错。唯一索引把这种竞争变成一次
+    # IntegrityError，写入方捕获它当作「已经记过了」，语义正确且不需要重试。
+    (
+        "ux_decision_dedupe",
+        "decisions",
+        ("dedupe_key",),
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_dedupe ON decisions(dedupe_key)",
+    ),
+    (
+        "ix_decision_signal",
+        "decisions",
+        ("tenant_id", "signal_id"),
+        "CREATE INDEX IF NOT EXISTS ix_decision_signal ON decisions(tenant_id, signal_id)",
+    ),
+    (
+        "ix_decision_due",
+        "decisions",
+        ("verify_due_at",),
+        "CREATE INDEX IF NOT EXISTS ix_decision_due ON decisions(verify_due_at)",
+    ),
+    # 复盘查询的主路径：`verify_due_at <= now AND verdict IS NULL`。
+    # 已有 `ix_action_verify_due`（单列），但那个索引不覆盖 tenant，
+    # 一旦上了多租户就得全表扫描再过滤。
+    (
+        "ix_action_review_queue",
+        "actions",
+        ("tenant_id", "verify_due_at", "verdict"),
+        "CREATE INDEX IF NOT EXISTS ix_action_review_queue "
+        "ON actions(tenant_id, verify_due_at, verdict)",
     ),
 ]
 

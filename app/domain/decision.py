@@ -98,6 +98,43 @@ def judge_price_follow(
     actions: list[str] = []
     res = DecisionResult(decision="no_action", headline="", verify_days=14)
 
+    # ---- 第零道：他降到哪了？如果仍不低于我的价，就不存在「跟」这件事 ----
+    #
+    # 这一道是 Mock 数据当场撞出来的：自家 24.99，对手从 26.99 降到 24.99。
+    # 旧逻辑照样往下走到第五道，算出「日销需要涨到 85 单（+0%）才不亏」，
+    # 然后给出结论「可以跟进降价」。
+    #
+    # 而实际上**没有价差可跟**——他追平了，你不动就等于跟上了。
+    # 这个错误比数字算错更麻烦：它会给出一条需要人去执行的动作（"用 Coupon 让利"），
+    # 而执行它等于主动降价换一个本来就没丢的位置。
+    #
+    # 边界放在函数最前面，是因为后面每一道（保本线、清仓、库存、玩家数）
+    # 都建立在「有一个比现在更低的价要跟」这个前提上。前提不成立时，
+    # 后面算得再对也没有意义。
+    if competitor_new_price >= my_current_price:
+        gap = competitor_new_price - my_current_price
+        if abs(gap) < 0.005:
+            reasons.append(
+                f"对手降到 ${competitor_new_price:.2f}，正好追平你的 ${my_current_price:.2f}"
+            )
+            headline = "他追平了你的价，你不动就等于跟上了"
+        else:
+            reasons.append(
+                f"对手降到 ${competitor_new_price:.2f}，仍比你贵 ${gap:.2f}"
+            )
+            headline = "他还没降到你下面，没有价差可跟"
+        reasons.append("现在的选择不是「跟不跟」，而是「要不要主动下探抢份额」——那是另一条判断")
+        res.headline = headline
+        res.actions = [
+            "先不动。观察他追平之后你的转化率与 BSR 有没有掉",
+            "若 3 天内自然位开始下滑，再用 Coupon 小幅下探（不改标价，保护价格锚点）",
+            "别把「他降价了」当成「我该降价了」——他可能只是在清库存",
+        ]
+        res.verify_days = 7
+        res.confidence = 0.75
+        res.reasons = reasons
+        return res
+
     # ---- 第一道：保本线 ----
     if competitor_new_price < my_break_even_price:
         reasons.append(

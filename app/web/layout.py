@@ -217,6 +217,39 @@ details.exp[open]>summary{margin-bottom:8px}
   color:var(--muted)}
 .cap.yes{border-color:var(--ok);color:var(--ok)}
 .assume-l{color:var(--p1);font-weight:600}
+
+/* ── 复盘卡（动作记录页顶部） ── */
+.rv{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:13px 15px;margin-bottom:10px}
+/* 超期的左边加一道竖线。只用左边框、不用整框变色：
+   整框变红会让「超期 2 天」和「超期 30 天」看起来一样严重。 */
+.rv.over{border-left:3px solid var(--p1)}
+.rv .h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px}
+.rv .ttl{font-weight:650;font-size:13.5px}
+.rv .why{font-size:12.5px;color:var(--muted);line-height:1.75;margin:2px 0 8px}
+/* 前后对比一行：用 flex 而不是 grid。
+   grid 的 `1fr` 会把「22.99」和「21.99」各撑开半屏，中间的箭头漂在远处，
+   读起来像四列无关的数字。这里要的是「一个短语」，不是一张表。 */
+.rv .chg{display:flex;align-items:baseline;gap:9px;
+  font-size:12.5px;padding:4px 0;border-top:1px dashed var(--line)}
+.rv .chg:first-of-type{border-top:0}
+.rv .chg .k{color:var(--muted);width:96px;flex:none}
+/* 定宽 + 右对齐：多行之间数值能对成一列，扫一眼就能比 */
+.rv .chg b{font-variant-numeric:tabular-nums;min-width:62px;text-align:right}
+.rv .chg .arrow{color:var(--muted);flex:none}
+/* 差值刻意**不上色**。红涨绿跌是行情语义；这里是「对手降价 10%」——
+   对不同的人、不同的策略，同一件事是好是坏完全相反。
+   染色等于系统替人下了判断，而这套系统的规矩是「只摆事实」。 */
+.rv .delta{font-variant-numeric:tabular-nums;font-size:11.5px;padding:1px 7px;
+  border-radius:6px;background:var(--bg);border:1px solid var(--line);color:var(--muted)}
+.rv .acts{display:flex;gap:6px;align-items:center;margin-top:11px;flex-wrap:wrap}
+.rv .acts input{font:inherit;font-size:12.5px;flex:1;min-width:180px;padding:5px 9px;
+  border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text)}
+.rv .done{font-size:12.5px;color:var(--ok);margin-top:9px}
+.rv .dec{background:var(--bg);border-radius:9px;padding:9px 11px;margin-top:9px;
+  font-size:12.5px;line-height:1.8;display:none}
+.rv .dec.on{display:block}
+.rv .dec .lab{color:var(--muted);font-size:11.5px;margin-top:6px}
 """
 
 
@@ -238,6 +271,25 @@ function num(v, d){ if (v === null || v === undefined) return '—';
   return Number(v).toLocaleString('en-US', {maximumFractionDigits: d === undefined ? 0 : d}); }
 function pct(v, d){ if (v === null || v === undefined) return '—';
   return (Number(v) * 100).toFixed(d === undefined ? 1 : d) + '%'; }
+
+// 按后端给的 kind 格式化一个指标值。
+//
+// 为什么不让后端直接给 "$22.99"：后端拼一次、这里再 money() 一次，
+// 屏幕上就是 "$$22.99"——只有截图能发现，单测不会红。
+// 所以契约是「后端说是什么类型，前端决定长什么样」（见 ARCHITECTURE）。
+function kindVal(v, kind){
+  if (v === null || v === undefined) return '—';
+  switch (kind) {
+    case 'money':  return money(v);
+    case 'percent': return pct(v);
+    case 'rank':   return num(v) + ' 名';
+    case 'rating': return Number(v).toFixed(1) + ' 星';
+    case 'keywords': return Array.isArray(v) ? (v.length + ' 个词') : String(v);
+    case 'bool':   return v ? '有货' : '无货';
+    case 'path':   return Array.isArray(v) ? v.join(' › ') : String(v);
+    default:       return num(v, 2);
+  }
+}
 function dt(v){
   if (!v) return '—';
   const s = String(v).replace(' ', 'T');

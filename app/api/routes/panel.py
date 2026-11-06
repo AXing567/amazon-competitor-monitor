@@ -492,6 +492,58 @@ async def api_panel_record_action(
 
 
 # ============================================================
+# ⑤b 复盘
+# ============================================================
+
+
+@router.get("/api/panel/reviews")
+async def api_panel_reviews(
+    limit: int = Query(default=50, ge=1, le=500),
+    ahead: int = Query(default=0, ge=0, le=30),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> Any:
+    """到期该复盘的动作。
+
+    与 `/api/panel/actions` 分成两个端点而不是加个 `?due=1`：两者要的字段不一样。
+    时间线要「谁、什么时候、做了什么」，复盘队列要「动作前后的指标差」——
+    后者每个动作还要现抓一次当前快照。塞进一个端点会让时间线每次加载都多跑
+    N 次快照查询，而那一屏根本不看这些数。
+    """
+    ctx = _ctx(x_user_id)
+    return _json(
+        await run_in_threadpool(
+            _call, "get_due_reviews", ctx, limit=limit, include_future_days=ahead
+        )
+    )
+
+
+@router.post("/api/panel/reviews")
+async def api_panel_review_action(
+    request: Request,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> Any:
+    """回填一条动作的复盘结论。
+
+    `verdict` 由能力层校验（有效/无效/判不了）；这里不做二次校验，
+    否则同一个枚举会在两处各写一遍，加值时忘一处就静默失败。
+    """
+    body, err = await _body(request)
+    if err is not None:
+        return err
+    ctx = _ctx(x_user_id)
+    return _json(
+        await run_in_threadpool(
+            _call,
+            "review_action",
+            ctx,
+            action_id=body.get("action_id"),
+            verdict=body.get("verdict"),
+            note=body.get("note"),
+        )
+    )
+
+
+# ============================================================
 # ⑥ 数据健康
 # ============================================================
 

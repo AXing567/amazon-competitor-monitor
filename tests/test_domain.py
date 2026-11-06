@@ -224,6 +224,50 @@ def test_clearance_seasonal_short_circuit():
     assert "季节" in res.headline
 
 
+def test_no_follow_when_competitor_only_matches_my_price():
+    """对手降到和我一样的价 → 没有价差可跟，不该给出「跟价」这种动作。
+
+    ## 这个 bug 是怎么被发现的
+
+    Mock 数据里自家 24.99、对手从 26.99 降到 24.99。旧逻辑一路走到最后一道，
+    算出「日销需要涨到 85 单（+0%）才不亏」，然后给出结论「可以跟进降价」
+    和动作「用 Coupon 让利到 $24.99 附近」。
+
+    **那条动作是让你主动降价去守一个根本没丢的位置。**
+
+    数字没错（+0% 是算对的），错的是前提：整条判断链假设「有一个比现在更低的价要跟」。
+    前提不成立时，后面每一道判据算得再准都没有意义。
+    """
+    res = judge_price_follow(
+        competitor_new_price=20.0,
+        my_current_price=20.0,
+        my_break_even_price=15.0,
+        my_unit_profit_now=5.0,
+        my_daily_units=50,
+        my_dos=45,
+    )
+    assert res.decision == "no_action"
+    assert "追平" in res.headline
+    # 不能出现「跟到 $20.00 后…」这种以跟价为前提的表述
+    assert not any("跟到" in r for r in res.reasons)
+    # 但必须给下一步：不动也是有事的（盯着份额有没有掉）
+    assert res.actions
+
+
+def test_no_follow_when_competitor_still_above_my_price():
+    """对手降了价但仍比我贵 → 更没有可跟的。"""
+    res = judge_price_follow(
+        competitor_new_price=24.0,
+        my_current_price=20.0,
+        my_break_even_price=15.0,
+        my_unit_profit_now=5.0,
+        my_daily_units=50,
+        my_dos=45,
+    )
+    assert res.decision == "no_action"
+    assert "没有价差" in res.headline or "仍比你贵" in "".join(res.reasons)
+
+
 def test_out_of_stock_with_low_dos_warns_against_price_cut():
     res = build_out_of_stock_decision(competitor_asin="B0X", my_dos=10)
     assert res.decision == "attack"

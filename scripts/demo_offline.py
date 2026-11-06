@@ -205,6 +205,7 @@ from app.models import (                                      # noqa: E402
     CollectRun,
     Competitor,
     CompetitorBinding,
+    Decision,
     MyProduct,
     Signal,
     Snapshot,
@@ -710,6 +711,10 @@ def _clean(verify: bool = True) -> None:
         )
         if ids:
             s.execute(delete(CollectRun).where(CollectRun.competitor_id.in_(ids)))
+            # `decisions` 必须排在 `signals` 前面：它同时引用 signals 和 competitors。
+            # 漏了这一步的症状是 `--clean` 报 FOREIGN KEY constraint failed，
+            # 而且只在「这次演示真的产生过决策」时复现——空库跑一次不会出现。
+            s.execute(delete(Decision).where(Decision.competitor_id.in_(ids)))
             s.execute(delete(Signal).where(Signal.competitor_id.in_(ids)))
             s.execute(delete(Snapshot).where(Snapshot.competitor_id.in_(ids)))
             s.execute(
@@ -842,6 +847,12 @@ def _demo_residuals() -> dict[str, int]:
                 )
             ),
             "collect_runs": count(select(CollectRun.id).where(CollectRun.competitor_id.in_(ids)))
+            if ids
+            else 0,
+            # 决策记录按「挂在演示竞品上」认领，与 `_clean()` 的删除谓词一致。
+            # 两边口径必须一致：删除按 A、核对按 B，就会退化成
+            # 「删掉了但数不出来」或者「数出来了却删不掉」，两种都会让自检失去意义。
+            "decisions": count(select(Decision.id).where(Decision.competitor_id.in_(ids)))
             if ids
             else 0,
             "actions": count(

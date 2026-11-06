@@ -80,8 +80,28 @@ from app.services import collector, identity, scheduler, settings_store, simulat
 # 公共夹具
 # ============================================================
 
-#: 本轮迁移给 `actions` 补的 5 列。抽成常量，免得三个用例各抄一遍抄错。
+#: 迁移给 `actions` 补的**身份五列**。这是本组用例的业务意图：
+#: 「谁、针对谁、依据什么、从哪来」少一个，动作记录就不完整。
+#: 抽成常量，免得几个用例各抄一遍抄错。
 _FIVE_NEW_COLUMNS = frozenset({"user_id", "competitor_id", "signal_id", "reason", "source"})
+
+
+def _actions_columns_from_migration() -> set[str]:
+    """`ADDITIVE_COLUMNS` 里所有针对 `actions` 的列。
+
+    ## 为什么断言数量要派生，不能写死
+
+    第一版这里写的是 `assert len(applied) == 5`。它在本轮加
+    `reviewed_at` / `review_note` 时红了——**代码是对的，红的是测试**。
+    一个只在「别人合法地加了一列」时才失败的测试，会训练人见到红就改数字，
+    然后真正该报警的那次也顺手改了。
+
+    派生之后：加列不用改测试；但「加了列却没进迁移清单」仍然会被抓住，
+    因为老库上 `migrate()` 出来的列数会少于模型声明的列数。
+    """
+    from app.migrations import ADDITIVE_COLUMNS
+
+    return {col for table, col, _ in ADDITIVE_COLUMNS if table == "actions"}
 
 _DB_READY = False
 
@@ -154,7 +174,21 @@ def _make_old_db(filename: str, rows: int = 2) -> tuple:
 
 
 def test_01_migrate_adds_all_five_columns_and_keeps_data():
-    """老库（无 5 新列、有 2 行数据）→ migrate：列全加上、数据一字不动、索引建好。"""
+    """老库（无新列、有 2 行数据）→ migrate：列全加上、数据一字不动、索引建好。
+
+    ## 断言为什么从「恰好 5 个」改成「从迁移清单派生」
+
+    第一版写的是 `new_cols - before_cols == {五个列名}`。这断言在**每次给
+    `actions` 加合法新列时都会红**——而那时代码是对的，红的是测试。
+    红了的测试只有两种结局：改断言、或者被人加 `-k "not test_01"` 跳过。
+    两条路都会让这个测试在真正该报警的时候已经不可信了。
+
+    所以改成：核心五列必须在内（这是本测试的业务意图），
+    总数从 `ADDITIVE_COLUMNS` 派生。加列时不用改这里，
+    但「加了列却没进迁移清单」仍然会被抓住（`new_cols - before_cols` 会超出 expected）。
+    """
+    from app.migrations import ADDITIVE_COLUMNS
+
     engine, original = _make_old_db("old_add.db", rows=2)
 
     before_cols = {r[1] for r in _table_info(engine, "actions")}
@@ -164,10 +198,14 @@ def test_01_migrate_adds_all_five_columns_and_keeps_data():
         "result_metrics", "verdict",
     }
 
+    expected = {col for table, col, _ in ADDITIVE_COLUMNS if table == "actions"}
+    # 业务意图：这五列是「谁、针对谁、依据什么、从哪来」，少一个动作记录就不完整
+    assert {"user_id", "competitor_id", "signal_id", "reason", "source"} <= expected
+
     applied = migrate(engine)
     new_cols = {r[1] for r in _table_info(engine, "actions")}
-    assert new_cols - before_cols == {"user_id", "competitor_id", "signal_id", "reason", "source"}
-    assert len(applied) == 5, applied
+    assert new_cols - before_cols == expected
+    assert len(applied) == len(expected), applied
     assert all("[added]" in a for a in applied), applied
 
     # 类型也要对（不是「有这列就行」）
@@ -177,6 +215,8 @@ def test_01_migrate_adds_all_five_columns_and_keeps_data():
     assert types["signal_id"] == "INTEGER"
     assert types["reason"] == "TEXT"
     assert types["source"] == "VARCHAR(16)"
+    assert types["reviewed_at"] == "DATETIME"
+    assert types["review_note"] == "TEXT"
 
     # 数据零丢失：老行的每个字段都要原样在
     with engine.connect() as conn:
@@ -193,7 +233,7 @@ def test_01_migrate_adds_all_five_columns_and_keeps_data():
 def test_02_migrate_is_idempotent_and_does_not_touch_rows():
     """连跑 3 次：第 2/3 次必须返回空列表，且字段值不变。"""
     engine, original = _make_old_db("old_idem.db", rows=3)
-    assert len(migrate(engine)) == 5
+    assert len(migrate(engine)) == len(_actions_columns_from_migration())
     assert migrate(engine) == []
     assert migrate(engine) == []
 
@@ -228,7 +268,7 @@ def test_03_init_db_upgrades_old_db_without_data_loss():
     finally:
         db_mod.engine, db_mod.SessionLocal = real_engine, real_session
 
-    assert len(first) == 5, first
+    assert len(first) == len(_actions_columns_from_migration()), first
     assert second == [] and third == [], (second, third)
 
     cols = {r[1] for r in _table_info(engine, "actions")}
@@ -379,7 +419,7 @@ def test_fixed_03_migration_rolls_back_entirely_when_it_fails():
 
     # 失败可重入：坏 DDL 拿掉后必须能一次补齐
     report = migrate_report(engine)
-    assert len(report["applied"]) == 5, report
+    assert len(report["applied"]) == len(_actions_columns_from_migration()), report
     assert _FIVE_NEW_COLUMNS <= {r[1] for r in _table_info(engine, "actions")}
     engine.dispose()
 
@@ -417,7 +457,7 @@ def test_fixed_02_migrate_skips_index_when_column_missing():
 
     engine = create_engine(f"sqlite:///{path}")
     report = migrate_report(engine)        # 修之前这里抛 no such column
-    assert len(report["applied"]) == 5, report["applied"]
+    assert len(report["applied"]) == len(_actions_columns_from_migration()), report["applied"]
     assert _FIVE_NEW_COLUMNS <= {r[1] for r in _table_info(engine, "actions")}
     assert any(
         "ix_action_user_time" in s and "executed_at" in s for s in report["skipped"]
